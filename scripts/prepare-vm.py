@@ -46,3 +46,5 @@ def materialize(name, version, checksum, patch_name):
 
 materialize('ristretto_intrinsics', '0.34.0', PIN['intrinsics_sha256'], 'ristretto.patch')
 materialize('sysinfo', '0.39.6', PIN['sysinfo_sha256'], 'sysinfo.patch')
+
+materialize('ristretto_gc', '0.34.0', PIN['gc_sha256'], 'ristretto-gc.patch')

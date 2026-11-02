@@ -12,3 +12,6 @@ sha2 = "0.10"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tar = "0.4"
 zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+ristretto_gc = "=0.34.0"

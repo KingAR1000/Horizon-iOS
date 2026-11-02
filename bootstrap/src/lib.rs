@@ -499,6 +499,69 @@ fn resource_classpath(cp: &str, home: &Path) -> Result<Vec<String>, String> {
 #[cfg(all(test, not(target_os = "ios")))]
 mod tests {
     use super::*;
+    #[test]
+    fn collector_retains_and_reclaims_a_deep_graph() {
+        use ristretto_gc::{Configuration, GarbageCollector, Gc, GcRootGuard, Trace};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        struct Node {
+            next: Option<Gc<Node>>,
+            alive: Arc<AtomicUsize>,
+        }
+        impl Trace for Node {
+            fn trace(&self, collector: &GarbageCollector) {
+                self.next.trace(collector);
+            }
+        }
+        impl Drop for Node {
+            fn drop(&mut self) {
+                self.alive.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let collector = GarbageCollector::with_config(
+            Configuration::builder()
+                .threads(1)
+                .allocation_threshold(usize::MAX)
+                .build(),
+        );
+        let alive = Arc::new(AtomicUsize::new(0));
+        let mut head: Option<GcRootGuard<Node>> = None;
+        for _ in 0..100_000 {
+            alive.fetch_add(1, Ordering::SeqCst);
+            let next = head.as_ref().map(|node| node.clone_gc());
+            head = Some(Gc::new(
+                &collector,
+                Node {
+                    next,
+                    alive: alive.clone(),
+                },
+            ));
+        }
+        collector.start();
+        let cycle = || {
+            let before = collector.statistics().unwrap().collections_completed;
+            collector.collect();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while collector.statistics().unwrap().collections_completed == before {
+                assert!(Instant::now() < deadline, "collection did not finish");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        cycle();
+        assert_eq!(alive.load(Ordering::SeqCst), 100_000);
+        let mut count = 0;
+        let mut node = head.as_ref().map(|node| node.clone_gc());
+        while let Some(current) = node {
+            count += 1;
+            node = current.next.clone();
+        }
+        assert_eq!(count, 100_000);
+        drop(head);
+        cycle();
+        assert_eq!(alive.load(Ordering::SeqCst), 0);
+        collector.stop().unwrap();
+    }
+
     /// Runs on a host with JAVA_HOME: checks the language features required by the
     /// real exporters, and invokes two entry points through one retained interpreter.
     #[test]

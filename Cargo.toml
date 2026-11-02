@@ -14,6 +14,7 @@ horizon-client = { path = "engine/crates/horizon-client", default-features = fal
 horizon-ios-platform = { path = "platform" }
 
 [patch.crates-io]
+ristretto_gc = { path = "build/vendor/ristretto_gc" }
 sysinfo = { path = "build/vendor/sysinfo" }
 ristretto_intrinsics = { path = "build/vendor/ristretto_intrinsics" }
 wgpu-hal = { path = "engine/third_party/wgpu-hal" }

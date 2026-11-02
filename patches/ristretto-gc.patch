@@ -1,0 +1,38 @@
+--- a/src/gc.rs
++++ b/src/gc.rs
+@@ -363,11 +363,10 @@
+         // Mark this object as reachable in the object registry
+         let ptr = SafePtr::from_ptr(self.ptr.as_ptr().cast::<u8>());
+ 
+-        // Check if this object was already marked to prevent infinite recursion in cycles
+-        if collector.try_mark_object(ptr) {
+-            // Only trace the contents if this is the first time we're marking this object
+-            // This prevents infinite recursion in cyclic object graphs
+-            (**self).trace(collector);
++        // The collector marks on dequeue, so cycles and duplicate edges are skipped
++        // there. Queue children instead of recursing through an unbounded Java graph.
++        if !collector.is_object_marked(ptr) {
++            collector.add_to_mark_queue(&**self);
+         }
+     }
+ }
+--- a/src/collector.rs
++++ b/src/collector.rs
+@@ -468,14 +468,9 @@
+     /// Adds an object to the mark queue for concurrent marking. This is used by the write barrier
+     /// when a reference is stored during concurrent marking.
+     pub(crate) fn add_to_mark_queue<T: Trace>(&self, obj: &T) {
+-        if let Ok(mut queue) = self.mark_queue.try_lock() {
+-            queue.push_back(TracePtr::new(obj));
+-        }
+-        // If we can't acquire the lock immediately, the object is skipped for *this* cycle.
+-        // This is a liveness property, not a safety property: the object won't be prematurely
+-        // collected (allocation-color-black keeps new objects alive), but its reachable
+-        // subgraph may remain unmarked until the next collection cycle, increasing floating
+-        // garbage temporarily.
++        // Marking releases this lock before calling Trace. Waiting here ensures an
++        // existing reachable child is not lost when a concurrent barrier holds the queue.
++        self.mark_queue.lock().expect("GC mark queue poisoned").push_back(TracePtr::new(obj));
+     }
+ 
+     /// Checks if an object is already marked to avoid infinite loops during tracing. Used by

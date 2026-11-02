@@ -1739,6 +1739,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "horizon-prepare",
+ "ristretto_gc",
  "ristretto_vm",
  "serde_json",
  "sha2",
@@ -3745,8 +3746,6 @@ dependencies = [
 [[package]]
 name = "ristretto_gc"
 version = "0.34.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2aaf5c930a7b26e46aafb7bbed197d02428855ac2d911474964beb1bb340056"
 dependencies = [
  "dashmap",
  "parking_lot",

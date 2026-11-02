@@ -17,7 +17,8 @@ cp engine/THIRD_PARTY_NOTICES.md "$app/UPSTREAM_THIRD_PARTY_NOTICES.md"
 cp THIRD_PARTY_NOTICES.md "$app/THIRD_PARTY_NOTICES.md"
 # Preserve bundled font and vendored-library license texts in the distributed app.
 mkdir -p "$app/Licenses"
-find engine/third_party engine/crates/horizon-theme build/vendor/ristretto_intrinsics build/vendor/sysinfo -type f \( -iname '*license*' -o -iname '*notice*' -o -name 'OFL*' \) -print0 |
+cp ios/Licenses/* "$app/Licenses/"
+find engine/third_party engine/crates/horizon-theme build/vendor/ristretto_intrinsics build/vendor/ristretto_gc build/vendor/sysinfo -type f \( -iname '*license*' -o -iname '*notice*' -o -name 'OFL*' \) -print0 |
 while IFS= read -r -d '' file; do
     name="${file//\//_}"
     cp "$file" "$app/Licenses/$name"
