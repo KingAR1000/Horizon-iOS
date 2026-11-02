@@ -33,7 +33,7 @@ impl Write for Output {
             .flush()
     }
 }
-async fn invoke(vm: &VM, main: &str, parameters: &[String]) -> ristretto_vm::Result<()> {
+async fn invoke(vm: &VM, main: &str, parameters: &[String]) -> ristretto_vm::Result<bool> {
     let mut strings = Vec::with_capacity(parameters.len());
     for parameter in parameters {
         strings.push(
@@ -54,7 +54,23 @@ async fn invoke(vm: &VM, main: &str, parameters: &[String]) -> ristretto_vm::Res
         .invoke(main, "main([Ljava/lang/String;)V", &[array])
         .await
     {
+        if matches!(&failure, ristretto_vm::Error::InternalError(message) if message == "horizon.embedded.exit:0")
+        {
+            return Ok(true);
+        }
         if let ristretto_vm::Error::Throwable(value) = &failure {
+            if let Ok(object) = value.as_object_ref() {
+                if object.class().name() == "java/lang/InternalError"
+                    && object
+                        .value("detailMessage")
+                        .and_then(|v| v.as_string())
+                        .ok()
+                        .as_deref()
+                        == Some("Internal error: horizon.embedded.exit:0")
+                {
+                    return Ok(true);
+                }
+            }
             let _ = vm
                 .invoke(
                     "java/lang/Throwable",
@@ -65,7 +81,7 @@ async fn invoke(vm: &VM, main: &str, parameters: &[String]) -> ristretto_vm::Res
         }
         return Err(failure);
     }
-    Ok(())
+    Ok(false)
 }
 struct ReleaseVm;
 impl Drop for ReleaseVm {
@@ -85,7 +101,7 @@ fn error(error: ristretto_vm::Error) -> String {
         if let Ok(object) = value.as_object_ref() {
             let message = object
                 .value("detailMessage")
-                .map(|v| v.to_string())
+                .and_then(|v| v.as_string())
                 .unwrap_or_default();
             return format!("{}: {message}", object.class().name());
         }
@@ -156,6 +172,7 @@ impl InProcessJava for Interpreter {
         let main = main.ok_or("Missing exporter main class")?;
         builder = builder.main_class(&main);
         builder = builder
+            .add_system_property("horizon.embedded", "true")
             .add_system_property("java.awt.headless", "true")
             .add_system_property(
                 "log4j2.loggerContextFactory",
@@ -209,10 +226,10 @@ impl InProcessJava for Interpreter {
             .runtime
             .block_on(invoke(&state.vm, &main, &parameters))
             .map_err(error);
-        if isolated || result.is_err() {
+        if isolated || result.as_ref().copied().unwrap_or(true) {
             *cached = None;
         }
-        result
+        result.map(|_| ())
     }
 }
 
@@ -336,9 +353,11 @@ pub fn install_runtime(archive: &Path, home: &Path) -> Result<(), String> {
     let source = fs::File::open(archive).map_err(|e| e.to_string())?;
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(source));
     let mut extracted = 0u64;
+    let mut links = Vec::new();
     for entry in tar.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
-        if !entry.header().entry_type().is_file() {
+        let kind = entry.header().entry_type();
+        if !kind.is_file() && !kind.is_symlink() {
             continue;
         }
         let path = entry.path().map_err(|e| e.to_string())?.into_owned();
@@ -358,10 +377,31 @@ pub fn install_runtime(archive: &Path, home: &Path) -> Result<(), String> {
         let extension = relative.extension().and_then(|s| s.to_str()).unwrap_or("");
         if !keep
             || matches!(
+                relative.to_str(),
+                Some("lib/src.zip" | "lib/ct.sym" | "lib/classlist")
+            )
+            || matches!(
                 extension,
                 "so" | "dll" | "dylib" | "a" | "debuginfo" | "jsa"
             )
         {
+            continue;
+        }
+        if kind.is_symlink() {
+            let link = entry
+                .link_name()
+                .map_err(|e| e.to_string())?
+                .ok_or("Missing runtime link target")?;
+            let mut resolved = relative.parent().unwrap().to_path_buf();
+            for component in link.components() {
+                match component {
+                    std::path::Component::Normal(name) => resolved.push(name),
+                    std::path::Component::ParentDir if resolved.pop() => {}
+                    std::path::Component::CurDir => {}
+                    _ => return Err("Unsafe runtime data link".into()),
+                }
+            }
+            links.push((relative.to_path_buf(), resolved));
             continue;
         }
         extracted = extracted
@@ -374,6 +414,25 @@ pub fn install_runtime(archive: &Path, home: &Path) -> Result<(), String> {
         fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
         let mut file = fs::File::create(target).map_err(|e| e.to_string())?;
         std::io::copy(&mut entry, &mut file).map_err(|e| e.to_string())?;
+    }
+    // Preserve the upstream legal/configuration links as ordinary sandboxed data files.
+    while !links.is_empty() {
+        let before = links.len();
+        let mut remaining = Vec::new();
+        for (relative, resolved) in links {
+            let source = stage.join(resolved);
+            if !source.is_file() {
+                remaining.push((relative, source.strip_prefix(&stage).unwrap().to_path_buf()));
+                continue;
+            }
+            let target = stage.join(relative);
+            fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
+            fs::copy(source, target).map_err(|e| e.to_string())?;
+        }
+        if remaining.len() == before {
+            return Err("Unresolved runtime data link".into());
+        }
+        links = remaining;
     }
     if !runtime_ready(&stage) {
         return Err("Incomplete Java class library installation".into());
@@ -470,6 +529,9 @@ public class Probe implements Codec<String> {
         java.nio.file.Files.writeString(java.nio.file.Path.of(args[0]), "passed");
     }
 }
+class Exit {
+    public static void main(String[] args) { System.exit(Integer.parseInt(args[0])); }
+}
 class Second {
     public static void main(String[] args) throws Exception {
         if (!java.nio.file.Files.readString(java.nio.file.Path.of(args[0])).equals("passed")) throw new AssertionError("files");
@@ -503,6 +565,20 @@ class Second {
             second.to_string_lossy().into_owned(),
         ]);
         interpreter.run(&args, Some(&dir), &log).unwrap();
+        let mut exit = vec![
+            "-cp".into(),
+            dir.to_string_lossy().into_owned(),
+            "Exit".into(),
+            "0".into(),
+        ];
+        interpreter.run(&exit, Some(&dir), &log).unwrap();
+        exit[3] = "7".into();
+        assert!(
+            interpreter
+                .run(&exit, Some(&dir), &log)
+                .unwrap_err()
+                .contains("exit:7")
+        );
         interpreter.release();
         assert_eq!(fs::read_to_string(second).unwrap(), "passed");
         fs::remove_dir_all(dir).unwrap();

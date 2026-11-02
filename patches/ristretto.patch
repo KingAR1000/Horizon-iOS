@@ -139,6 +139,25 @@
      }
  
      #[tokio::test]
+--- a/src/java/lang/shutdown.rs
++++ b/src/java/lang/shutdown.rs
+@@ -15,10 +15,15 @@
+ 
+ #[intrinsic_method("java/lang/Shutdown.halt0(I)V", Any)]
+ pub fn halt_0<T: Thread + 'static>(
+-    _thread: Arc<T>,
++    thread: Arc<T>,
+     mut parameters: Parameters,
+ ) -> Result<Option<Value>> {
+     let code = parameters.pop_int()?;
++    use ristretto_types::VM;
++    if thread.vm()?.system_properties().get("horizon.embedded").is_some_and(|value| value == "true") {
++        // Propagate termination to the embedding application instead of killing its process.
++        return Err(ristretto_types::Error::InternalError(format!("horizon.embedded.exit:{code}")));
++    }
+     std::process::exit(code);
+ }
+ 
 --- a/src/sun/nio/fs/unixnativedispatcher.rs
 +++ b/src/sun/nio/fs/unixnativedispatcher.rs
 @@ -81,9 +81,9 @@
