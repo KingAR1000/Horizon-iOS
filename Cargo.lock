@@ -1073,6 +1073,7 @@ dependencies = [
  "horizon-core",
  "horizon-friends",
  "horizon-hdr",
+ "horizon-ios-platform",
  "horizon-items",
  "horizon-mods",
  "horizon-narrator",
@@ -1121,6 +1122,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "horizon-client-core",
+ "horizon-ios-platform",
  "horizon-theme",
  "png",
  "winit",

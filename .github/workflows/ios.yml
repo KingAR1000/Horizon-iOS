@@ -18,6 +18,10 @@ jobs:
         run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
       - name: Install pinned Rust
         run: rustup show
+      - name: Validate patched dependencies
+        run: |
+          ./scripts/prepare.sh
+          cargo metadata --locked --filter-platform aarch64-apple-ios --format-version 1 > /dev/null
       - name: Build and package
         run: ./scripts/build.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
