@@ -1,0 +1,478 @@
+--- a/src/java/lang/invoke/methodhandlenatives.rs
++++ b/src/java/lang/invoke/methodhandlenatives.rs
+@@ -1489,10 +1489,14 @@
+                         // which already have appropriate access, so skip access check
+                         (found_class, found_method, true)
+                     } else {
+-                        return Err(InternalError(format!(
+-                            "Lambda method not found: {}.{method_name}{method_descriptor}",
+-                            class.name()
+-                        )));
++                        // A speculative JVM member search must return a Java null.
++                        // None is a void native result and would underflow the Java operand stack.
++                        if speculative_resolve {
++                            return Ok(Some(Value::Object(None)));
++                        }
++                        return Err(NoSuchMethodError(format!(
++                            "{}.{method_name}{method_descriptor}", class.name()
++                        )).into());
+                     }
+                 }
+                 Err(_) if class.name() == "java/lang/Object" => {
+--- a/src/java/lang/thread.rs
++++ b/src/java/lang/thread.rs
+@@ -154,14 +154,13 @@
+     "java/lang/Thread.findScopedValueBindings()Ljava/lang/Object;",
+     GreaterThanOrEqual(JAVA_21)
+ )]
+-pub fn find_scoped_value_bindings<T: Thread + 'static>(
+-    _thread: Arc<T>,
+-    _parameters: Parameters,
+-) -> Result<Option<Value>> {
+-    Err(JavaError::UnsatisfiedLinkError(
+-        "java.lang.Thread.findScopedValueBindings()Ljava/lang/Object;".to_string(),
+-    )
+-    .into())
++pub async fn find_scoped_value_bindings<T: Thread + 'static>(
++    thread: Arc<T>,
++    _parameters: Parameters,
++) -> Result<Option<Value>> {
++    let object = thread.java_object().await;
++    let bindings = object.as_object_ref()?.value("scopedValueBindings")?;
++    Ok(Some(bindings))
+ }
+ 
+ #[intrinsic_method(
+@@ -292,13 +291,22 @@
+     GreaterThanOrEqual(JAVA_21)
+ )]
+ pub fn scoped_value_cache<T: Thread + 'static>(
+-    _thread: Arc<T>,
+-    _parameters: Parameters,
+-) -> Result<Option<Value>> {
+-    Err(JavaError::UnsatisfiedLinkError(
+-        "java.lang.Thread.scopedValueCache()[Ljava/lang/Object;".to_string(),
+-    )
+-    .into())
++    thread: Arc<T>,
++    _parameters: Parameters,
++) -> Result<Option<Value>> {
++    let vm = thread.vm()?;
++    let caches = vm.resource_manager().get_or_init(ScopedCaches::<T>::new)?;
++    let mut entries = caches.entries.write();
++    entries.retain(|_, (owner, _)| owner.strong_count() != 0);
++    Ok(Some(entries.get(&thread.id()).map(|(_, value)| value.clone()).unwrap_or(Value::Object(None))))
++}
++
++// Each VM owns its caches; weak owners allow terminated threads to be reclaimed.
++struct ScopedCaches<T: Thread> {
++    entries: ristretto_gc::sync::RwLock<std::collections::HashMap<u64, (std::sync::Weak<T>, Value)>>,
++}
++impl<T: Thread> ScopedCaches<T> {
++    fn new() -> Self { Self { entries: ristretto_gc::sync::RwLock::new(std::collections::HashMap::new()) } }
+ }
+ 
+ #[intrinsic_method(
+@@ -418,14 +426,17 @@
+     GreaterThanOrEqual(JAVA_21)
+ )]
+ pub fn set_scoped_value_cache<T: Thread + 'static>(
+-    _thread: Arc<T>,
+-    mut parameters: Parameters,
+-) -> Result<Option<Value>> {
+-    let _cache = parameters.pop_reference()?;
+-    Err(JavaError::UnsatisfiedLinkError(
+-        "java.lang.Thread.setScopedValueCache([Ljava/lang/Object;)V".to_string(),
+-    )
+-    .into())
++    thread: Arc<T>,
++    mut parameters: Parameters,
++) -> Result<Option<Value>> {
++    let cache = parameters.pop()?;
++    let vm = thread.vm()?;
++    let caches = vm.resource_manager().get_or_init(ScopedCaches::<T>::new)?;
++    let mut entries = caches.entries.write();
++    entries.retain(|_, (owner, _)| owner.strong_count() != 0);
++    if matches!(cache, Value::Object(None)) { entries.remove(&thread.id()); }
++    else { entries.insert(thread.id(), (Arc::downgrade(&thread), cache)); }
++    Ok(None)
+ }
+ 
+ #[intrinsic_method("java/lang/Thread.sleep(J)V", LessThanOrEqual(JAVA_17))]
+@@ -855,11 +866,8 @@
+     #[tokio::test]
+     async fn test_find_scoped_value_bindings() {
+         let (_vm, thread) = crate::test::thread().await.expect("thread");
+-        let result = find_scoped_value_bindings(thread, Parameters::default());
+-        assert_eq!(
+-            "java.lang.Thread.findScopedValueBindings()Ljava/lang/Object;",
+-            result.unwrap_err().to_string()
+-        );
++        let result = find_scoped_value_bindings(thread, Parameters::default()).await.unwrap();
++        assert_eq!(result, Some(Value::Object(None)));
+     }
+ 
+     #[tokio::test]
+@@ -959,11 +967,7 @@
+     #[tokio::test]
+     async fn test_scoped_value_cache() {
+         let (_vm, thread) = crate::test::thread().await.expect("thread");
+-        let result = scoped_value_cache(thread, Parameters::default());
+-        assert_eq!(
+-            "java.lang.Thread.scopedValueCache()[Ljava/lang/Object;",
+-            result.unwrap_err().to_string()
+-        );
++        assert_eq!(scoped_value_cache(thread, Parameters::default()).unwrap(), Some(Value::Object(None)));
+     }
+ 
+     #[tokio::test]
+@@ -991,11 +995,7 @@
+     #[tokio::test]
+     async fn test_set_scoped_value_cache() {
+         let (_vm, thread) = crate::test::thread().await.expect("thread");
+-        let result = set_scoped_value_cache(thread, Parameters::new(vec![Value::Object(None)]));
+-        assert_eq!(
+-            "java.lang.Thread.setScopedValueCache([Ljava/lang/Object;)V",
+-            result.unwrap_err().to_string()
+-        );
++        assert_eq!(set_scoped_value_cache(thread, Parameters::new(vec![Value::Object(None)])).unwrap(), None);
+     }
+ 
+     #[tokio::test]
+--- a/src/sun/nio/fs/unixnativedispatcher.rs
++++ b/src/sun/nio/fs/unixnativedispatcher.rs
+@@ -81,9 +81,9 @@
+ }
+ 
+ #[cfg(target_family = "unix")]
+-#[cfg_attr(target_os = "macos", expect(clippy::cast_possible_wrap))]
++#[cfg_attr(target_vendor = "apple", expect(clippy::cast_possible_wrap))]
+ fn set_stat_fields(object: &mut ristretto_classloader::Object, stat: &libc::stat) -> Result<()> {
+-    #[cfg(target_os = "macos")]
++    #[cfg(target_vendor = "apple")]
+     let (mode, inode, device, raw_device, link_count, user_id, group_id) = (
+         i32::from(stat.st_mode),
+         stat.st_ino as i64,
+@@ -93,7 +93,7 @@
+         stat.st_uid as i32,
+         stat.st_gid as i32,
+     );
+-    #[cfg(not(target_os = "macos"))]
++    #[cfg(not(target_vendor = "apple"))]
+     let (mode, inode, device, raw_device, link_count, user_id, group_id) = (
+         wrapping_i32_from_unsigned(stat.st_mode),
+         wrapping_i64_from_unsigned(stat.st_ino),
+@@ -141,9 +141,9 @@
+         "st_ctime_nsec",
+         Value::Long(platform_signed_to_i64(change_nsec)),
+     )?;
+-    #[cfg(target_os = "macos")]
++    #[cfg(target_vendor = "apple")]
+     set_birthtime_fields(object, stat.st_birthtime, stat.st_birthtime_nsec, true)?;
+-    #[cfg(not(target_os = "macos"))]
++    #[cfg(not(target_vendor = "apple"))]
+     set_birthtime_fields(object, 0, 0, false)?;
+     Ok(())
+ }
+@@ -153,23 +153,23 @@
+     value.into()
+ }
+ 
+-#[cfg(all(target_family = "unix", not(target_os = "macos")))]
++#[cfg(all(target_family = "unix", not(target_vendor = "apple")))]
+ fn wrapping_i32_from_unsigned<T: Into<u64>>(value: T) -> i32 {
+     truncating_i32_from_u64(value.into())
+ }
+ 
+-#[cfg(all(target_family = "unix", not(target_os = "macos")))]
++#[cfg(all(target_family = "unix", not(target_vendor = "apple")))]
+ fn wrapping_i64_from_unsigned<T: Into<u64>>(value: T) -> i64 {
+     wrapping_i64_from_u64(value.into())
+ }
+ 
+-#[cfg(all(target_family = "unix", not(target_os = "macos")))]
++#[cfg(all(target_family = "unix", not(target_vendor = "apple")))]
+ #[expect(clippy::cast_possible_truncation)]
+ const fn truncating_i32_from_u64(value: u64) -> i32 {
+     value as i32
+ }
+ 
+-#[cfg(all(target_family = "unix", not(target_os = "macos")))]
++#[cfg(all(target_family = "unix", not(target_vendor = "apple")))]
+ #[expect(clippy::cast_possible_wrap)]
+ const fn wrapping_i64_from_u64(value: u64) -> i64 {
+     value as i64
+@@ -502,7 +502,7 @@
+     }
+ }
+ 
+-#[cfg(target_os = "macos")]
++#[cfg(target_vendor = "apple")]
+ #[expect(unsafe_code)]
+ fn clear_errno() {
+     unsafe {
+@@ -512,7 +512,7 @@
+ 
+ #[cfg(all(
+     target_family = "unix",
+-    not(any(target_os = "linux", target_os = "macos"))
++    not(any(target_os = "linux", target_vendor = "apple"))
+ ))]
+ fn clear_errno() {}
+ 
+@@ -671,7 +671,7 @@
+     {
+         let c_path = to_cstring(&path_str)?;
+         #[expect(clippy::cast_sign_loss, unsafe_code)]
+-        #[cfg_attr(target_os = "macos", expect(clippy::cast_possible_truncation))]
++        #[cfg_attr(target_vendor = "apple", expect(clippy::cast_possible_truncation))]
+         let result = unsafe { libc::chmod(c_path.as_ptr(), mode as libc::mode_t) };
+         if result < 0 {
+             return Err(throw_unix_exception(&thread, last_errno()).await);
+@@ -877,7 +877,7 @@
+     #[cfg(target_family = "unix")]
+     {
+         #[expect(clippy::cast_sign_loss, unsafe_code)]
+-        #[cfg_attr(target_os = "macos", expect(clippy::cast_possible_truncation))]
++        #[cfg_attr(target_vendor = "apple", expect(clippy::cast_possible_truncation))]
+         let result = unsafe { libc::fchmod(fd, mode as libc::mode_t) };
+         if result < 0 {
+             return Err(throw_unix_exception(&thread, last_errno()).await);
+@@ -912,7 +912,7 @@
+     {
+         let c_path = to_cstring(&path_str)?;
+         #[expect(clippy::cast_sign_loss, unsafe_code)]
+-        #[cfg_attr(target_os = "macos", expect(clippy::cast_possible_truncation))]
++        #[cfg_attr(target_vendor = "apple", expect(clippy::cast_possible_truncation))]
+         let result = unsafe { libc::fchmodat(dirfd, c_path.as_ptr(), mode as libc::mode_t, flags) };
+         if result < 0 {
+             return Err(throw_unix_exception(&thread, last_errno()).await);
+@@ -937,11 +937,11 @@
+     _thread: Arc<T>,
+     _parameters: Parameters,
+ ) -> Result<Option<Value>> {
+-    #[cfg(target_os = "macos")]
++    #[cfg(target_vendor = "apple")]
+     {
+         Ok(Some(Value::from(true)))
+     }
+-    #[cfg(not(target_os = "macos"))]
++    #[cfg(not(target_vendor = "apple"))]
+     {
+         Ok(Some(Value::from(false)))
+     }
+@@ -1058,7 +1058,7 @@
+         value.as_mut_ptr().cast::<libc::c_void>()
+     };
+ 
+-    #[cfg(target_os = "macos")]
++    #[cfg(target_vendor = "apple")]
+     {
+         let c_name = to_cstring(&name_str)?;
+         #[expect(unsafe_code)]
+@@ -1105,7 +1105,7 @@
+     }
+     #[cfg(all(
+         target_family = "unix",
+-        not(any(target_os = "android", target_os = "linux", target_os = "macos"))
++        not(any(target_os = "android", target_os = "linux", target_vendor = "apple"))
+     ))]
+     {
+         let _ = (fd, name_str, value_pointer, value);
+@@ -1153,7 +1153,7 @@
+         list.as_mut_ptr().cast::<libc::c_char>()
+     };
+ 
+-    #[cfg(target_os = "macos")]
++    #[cfg(target_vendor = "apple")]
+     {
+         #[expect(unsafe_code)]
+         let result = unsafe { libc::flistxattr(fd, list_pointer, size, 0) };
+@@ -1197,7 +1197,7 @@
+     }
+     #[cfg(all(
+         target_family = "unix",
+-        not(any(target_os = "android", target_os = "linux", target_os = "macos"))
++        not(any(target_os = "android", target_os = "linux", target_vendor = "apple"))
+     ))]
+     {
+         let _ = (fd, list_pointer, list);
+@@ -1297,7 +1297,7 @@
+     #[cfg_attr(not(target_family = "unix"), expect(unused_variables))]
+     let name_str = read_native_path(&*vm, name_address)?;
+ 
+-    #[cfg(target_os = "macos")]
++    #[cfg(target_vendor = "apple")]
+     {
+         let c_name = to_cstring(&name_str)?;
+         #[expect(unsafe_code)]
+@@ -1319,7 +1319,7 @@
+     }
+     #[cfg(all(
+         target_family = "unix",
+-        not(any(target_os = "android", target_os = "linux", target_os = "macos"))
++        not(any(target_os = "android", target_os = "linux", target_vendor = "apple"))
+     ))]
+     {
+         let _ = (fd, name_str);
+@@ -1367,7 +1367,7 @@
+         value.as_ptr().cast::<libc::c_void>()
+     };
+ 
+-    #[cfg(target_os = "macos")]
++    #[cfg(target_vendor = "apple")]
+     {
+         let c_name = to_cstring(&name_str)?;
+         #[expect(unsafe_code)]
+@@ -1390,7 +1390,7 @@
+     }
+     #[cfg(all(
+         target_family = "unix",
+-        not(any(target_os = "android", target_os = "linux", target_os = "macos"))
++        not(any(target_os = "android", target_os = "linux", target_vendor = "apple"))
+     ))]
+     {
+         let _ = (fd, name_str, value_pointer, value);
+@@ -1453,9 +1453,12 @@
+ 
+     set_unix_metadata_fields(object, &metadata)?;
+ 
+-    #[cfg(target_os = "macos")]
+-    {
++    #[cfg(target_vendor = "apple")]
++    {
++        #[cfg(target_os = "macos")]
+         use std::os::macos::fs::MetadataExt as MacMetadataExt;
++        #[cfg(target_os = "ios")]
++        use std::os::ios::fs::MetadataExt as MacMetadataExt;
+         set_birthtime_fields(
+             object,
+             metadata.st_birthtime(),
+@@ -1467,7 +1470,7 @@
+     {
+         set_linux_birthtime_fields(object, fd, c"", libc::AT_EMPTY_PATH)?;
+     }
+-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+     {
+         set_birthtime_fields(object, 0, 0, false)?;
+     }
+@@ -1849,13 +1852,13 @@
+         } else {
+             capabilities
+         };
+-        #[cfg(target_os = "macos")]
++        #[cfg(target_vendor = "apple")]
+         let capabilities = capabilities | SupportsFlags::BIRTHTIME.bits();
+         return Ok(Some(Value::Int(capabilities)));
+     }
+ 
+     #[cfg_attr(
+-        not(any(target_family = "unix", target_os = "macos", target_os = "linux")),
++        not(any(target_family = "unix", target_vendor = "apple", target_os = "linux")),
+         expect(unused_mut)
+     )]
+     let mut capabilities = SupportsFlags::empty();
+@@ -1867,7 +1870,7 @@
+         capabilities |= SupportsFlags::XATTR;
+     }
+ 
+-    #[cfg(target_os = "macos")]
++    #[cfg(target_vendor = "apple")]
+     {
+         capabilities |= SupportsFlags::FUTIMES;
+         capabilities |= SupportsFlags::LUTIMES;
+@@ -1985,9 +1988,12 @@
+ 
+     set_unix_metadata_fields(object, &metadata)?;
+ 
+-    #[cfg(target_os = "macos")]
+-    {
++    #[cfg(target_vendor = "apple")]
++    {
++        #[cfg(target_os = "macos")]
+         use std::os::macos::fs::MetadataExt as MacMetadataExt;
++        #[cfg(target_os = "ios")]
++        use std::os::ios::fs::MetadataExt as MacMetadataExt;
+         set_birthtime_fields(
+             object,
+             metadata.st_birthtime(),
+@@ -2000,7 +2006,7 @@
+         let path = to_cstring(&path_str)?;
+         set_linux_birthtime_fields(object, libc::AT_FDCWD, &path, libc::AT_SYMLINK_NOFOLLOW)?;
+     }
+-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+     {
+         set_birthtime_fields(object, 0, 0, false)?;
+     }
+@@ -2091,7 +2097,7 @@
+     {
+         let c_path = to_cstring(&path_str)?;
+         #[expect(clippy::cast_sign_loss, unsafe_code)]
+-        #[cfg_attr(target_os = "macos", expect(clippy::cast_possible_truncation))]
++        #[cfg_attr(target_vendor = "apple", expect(clippy::cast_possible_truncation))]
+         let result = unsafe { libc::mkdir(c_path.as_ptr(), mode as libc::mode_t) };
+         if result < 0 {
+             return Err(throw_unix_exception(&thread, last_errno()).await);
+@@ -2125,7 +2131,7 @@
+     {
+         let c_path = to_cstring(&path_str)?;
+         #[expect(clippy::cast_sign_loss)]
+-        #[cfg_attr(target_os = "macos", expect(clippy::cast_possible_truncation))]
++        #[cfg_attr(target_vendor = "apple", expect(clippy::cast_possible_truncation))]
+         #[expect(unsafe_code)]
+         let result =
+             unsafe { libc::mknod(c_path.as_ptr(), mode as libc::mode_t, dev as libc::dev_t) };
+@@ -2717,9 +2723,12 @@
+     set_unix_metadata_fields(object, &metadata)?;
+ 
+     // Birth time; macOS supports it, Linux may not
+-    #[cfg(target_os = "macos")]
+-    {
++    #[cfg(target_vendor = "apple")]
++    {
++        #[cfg(target_os = "macos")]
+         use std::os::macos::fs::MetadataExt as MacMetadataExt;
++        #[cfg(target_os = "ios")]
++        use std::os::ios::fs::MetadataExt as MacMetadataExt;
+         set_birthtime_fields(
+             object,
+             metadata.st_birthtime(),
+@@ -2732,7 +2741,7 @@
+         let path = to_cstring(&path_bytes)?;
+         set_linux_birthtime_fields(object, libc::AT_FDCWD, &path, 0)?;
+     }
+-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+     {
+         set_birthtime_fields(object, 0, 0, false)?;
+     }
+@@ -2815,13 +2824,13 @@
+         {
+             object.set_value("f_frsize", Value::Long(buf.f_frsize as i64))?;
+         }
+-        #[cfg(target_os = "macos")]
++        #[cfg(target_vendor = "apple")]
+         {
+             object.set_value("f_blocks", Value::Long(i64::from(buf.f_blocks)))?;
+             object.set_value("f_bfree", Value::Long(i64::from(buf.f_bfree)))?;
+             object.set_value("f_bavail", Value::Long(i64::from(buf.f_bavail)))?;
+         }
+-        #[cfg(not(target_os = "macos"))]
++        #[cfg(not(target_vendor = "apple"))]
+         #[expect(clippy::cast_possible_wrap)]
+         {
+             object.set_value("f_blocks", Value::Long(buf.f_blocks as i64))?;
+@@ -3872,9 +3881,9 @@
+         let _ = std::fs::remove_file(&temp_file);
+ 
+         // O_CREAT | O_RDWR | O_TRUNC (macOS flags)
+-        #[cfg(target_os = "macos")]
++        #[cfg(target_vendor = "apple")]
+         let flags = 0x0202 | 0x0400; // O_RDWR | O_CREAT | O_TRUNC
+-        #[cfg(not(target_os = "macos"))]
++        #[cfg(not(target_vendor = "apple"))]
+         let flags = 0x02 | 0x40 | 0x200; // O_RDWR | O_CREAT | O_TRUNC
+ 
+         let path_addr = write_cstring_to_native(&*vm, temp_file.to_str().unwrap());

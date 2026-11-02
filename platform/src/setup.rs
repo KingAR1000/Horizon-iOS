@@ -2,6 +2,7 @@
 //! Protocol follows Horizon's MIT-licensed launcher/account.rs (Ludovic Marie and contributors).
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use std::{
     fs,
     io::{Read, Write},
@@ -186,10 +187,7 @@ impl Installer {
             refresh,
         })
     }
-    fn get(&self, url: &str) -> Result<Value> {
-        successful(response(self.http.get(url).call())?, "Mojang")
-    }
-    fn download(
+    pub(crate) fn download(
         &self,
         url: &str,
         hash: &str,
@@ -197,7 +195,7 @@ impl Installer {
         path: &Path,
         cancelled: &AtomicBool,
     ) -> Result<()> {
-        if hash.len() != 40 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if !matches!(hash.len(), 40 | 64) || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err("Invalid Mojang download checksum".into());
         }
         let valid = |path: &Path| -> bool {
@@ -207,7 +205,11 @@ impl Installer {
             if f.metadata().map(|m| m.len()).ok() != Some(size) {
                 return false;
             }
-            let mut sha = Sha1::new();
+            let mut sha: Box<dyn sha1::digest::DynDigest> = if hash.len() == 40 {
+                Box::new(Sha1::new())
+            } else {
+                Box::new(Sha256::new())
+            };
             let mut buf = [0; 65536];
             loop {
                 match f.read(&mut buf) {
@@ -216,7 +218,11 @@ impl Installer {
                     Err(_) => return false,
                 }
             }
-            format!("{:x}", sha.finalize()) == hash
+            sha.finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+                == hash
         };
         if valid(path) {
             return Ok(());
@@ -272,20 +278,29 @@ impl Installer {
             .map_err(|_| "Invalid pinned version")?;
         let version = field(&lock["minecraft"], "version")?;
         status("Downloading Mojang version information…");
-        let manifest =
-            self.get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")?;
-        let entry = manifest["versions"]
-            .as_array()
-            .and_then(|v| v.iter().find(|v| v["id"] == version))
-            .ok_or("The pinned Minecraft version is not available from Mojang")?;
+        let pin = field(&lock["minecraft"], "manifest_sha1")?;
+        let url = format!("https://piston-meta.mojang.com/v1/packages/{pin}/{version}.json");
+        let response = self
+            .http
+            .get(&url)
+            .call()
+            .map_err(|_| "Could not download the pinned version metadata")?;
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .take(16 * 1024 * 1024)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Version metadata download failed")?;
+        if format!("{:x}", Sha1::digest(&bytes)) != pin {
+            return Err("Mojang version metadata checksum mismatch".into());
+        }
+        let data: Value = serde_json::from_slice(&bytes).map_err(|_| "Invalid version metadata")?;
         let version_path = root
             .join("versions")
             .join(version)
             .join(format!("{version}.json"));
-        // Metadata is fetched over TLS; jar identities are also pinned independently below.
-        let data = self.get(field(entry, "url")?)?;
         fs::create_dir_all(version_path.parent().unwrap()).map_err(|e| e.to_string())?;
-        fs::write(&version_path, serde_json::to_vec(&data).unwrap()).map_err(|e| e.to_string())?;
+        fs::write(&version_path, bytes).map_err(|e| e.to_string())?;
         for kind in ["client", "server"] {
             status(&format!("Downloading Minecraft {kind}…"));
             let d = &data["downloads"][kind];
@@ -341,15 +356,20 @@ impl Installer {
         let objects: Value =
             serde_json::from_slice(&fs::read(index_path).map_err(|e| e.to_string())?)
                 .map_err(|_| "Invalid asset index")?;
+        let mut seen = std::collections::HashSet::new();
         let objects: Vec<_> = objects["objects"]
             .as_object()
             .ok_or("Missing asset objects")?
             .values()
+            .filter(|object| seen.insert(object["hash"].as_str().unwrap_or_default()))
             .collect();
+        let total = objects.len();
+        let completed = std::sync::atomic::AtomicUsize::new(0);
         status("Downloading textures, sounds and language assets…");
         std::thread::scope(|scope| {
             let mut workers = Vec::new();
             for group in objects.chunks(objects.len().div_ceil(4).max(1)) {
+                let completed = &completed;
                 workers.push(scope.spawn(move || -> Result<()> {
                     for obj in group {
                         let hash = field(obj, "hash")?;
@@ -367,6 +387,10 @@ impl Installer {
                             &root.join("assets/objects").join(&hash[..2]).join(hash),
                             cancelled,
                         )?;
+                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        if done % 16 == 0 || done == total {
+                            status(&format!("Downloading game assets: {done}/{total}"));
+                        }
                     }
                     Ok(())
                 }));
@@ -418,6 +442,26 @@ mod tests {
         installer
             .download("http://127.0.0.1:1/unreachable", sha, 3, &path, &cancelled)
             .unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(path.parent().unwrap()).unwrap();
+    }
+    #[test]
+    fn verifies_sha256_runtime_download() {
+        let path = std::env::temp_dir()
+            .join(format!("horizon-runtime-download-{}", std::process::id()))
+            .join("runtime");
+        let (url, task) = fixture(b"abc");
+        Installer::default()
+            .download(
+                &url,
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                3,
+                &path,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        task.join().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"abc");
         fs::remove_file(&path).unwrap();
         fs::remove_dir(path.parent().unwrap()).unwrap();
     }

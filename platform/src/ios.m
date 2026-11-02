@@ -23,6 +23,10 @@ const char *hz_documents(void) {
     returned = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     return returned.UTF8String;
 }
+const char *hz_bundle(void) { returned = NSBundle.mainBundle.resourcePath; return returned.UTF8String; }
+void hz_setup_busy(bool busy) {
+    dispatch_async(dispatch_get_main_queue(), ^{ UIApplication.sharedApplication.idleTimerDisabled = busy; });
+}
 const char *hz_clipboard_get(void) { returned = UIPasteboard.generalPasteboard.string ?: @""; return returned.UTF8String; }
 void hz_clipboard_set(const char *text) { UIPasteboard.generalPasteboard.string = [NSString stringWithUTF8String:text]; }
 void hz_background(bool begin) {
@@ -193,7 +197,7 @@ void hz_attach(void *view, bool importer) {
     if (importer) {
         overlay.backgroundColor=[UIColor colorWithRed:0.07 green:0.10 blue:0.15 alpha:1];
         overlay.message=[UILabel new]; overlay.message.numberOfLines=0; overlay.message.textColor=UIColor.whiteColor; overlay.message.textAlignment=NSTextAlignmentCenter;
-        overlay.message.text=NSLocalizedString(@"Horizon needs resources prepared from your own Minecraft installation. Select the exported resource folder in Files.",nil);
+        overlay.message.text=NSLocalizedString(@"Sign in with Microsoft to download Minecraft and prepare resources on this iPhone. Keep Horizon open during setup.",nil);
         [overlay addSubview:overlay.message]; [overlay button:@"Import resources" code:101];
     }
     if (!overlay.message) {

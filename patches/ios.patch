@@ -571,6 +571,426 @@ index 4f7d73769..2f571129e 100644
 +    #[cfg(any(target_os = "macos", target_os = "ios"))]
      let _ = (device, surface, paper_white, peak, black);
  }
+diff --git a/crates/horizon-prepare/src/artifacts.rs b/crates/horizon-prepare/src/artifacts.rs
+index 69f472324..3a861027a 100644
+--- a/crates/horizon-prepare/src/artifacts.rs
++++ b/crates/horizon-prepare/src/artifacts.rs
+@@ -5,13 +5,12 @@
+ //! (tools/test_rust_parity.py's `verify_artifacts`).
+ 
+ use crate::pyjson::{self, Value};
+-use crate::{digest, read_json, relative_display, write_json, Log};
++use crate::{Log, digest, read_json, relative_display, write_json};
+ use std::collections::HashMap;
+ use std::fs;
+ use std::path::{Component, Path, PathBuf};
+ 
+-const LAUNCHER_HINT: &str =
+-    "Horizon does not download the game: play {version} once in the launcher you play \
++const LAUNCHER_HINT: &str = "Horizon does not download the game: play {version} once in the launcher you play \
+ Minecraft Java Edition with so it downloads the game's files, then rerun. Horizon reads the \
+ official launcher's folder, ATLauncher's and the CurseForge app's; for Prism Launcher, MultiMC, \
+ the Modrinth App or GDLauncher, prepare from the Horizon launcher, which finds their files. If your launcher keeps \
+@@ -1336,9 +1335,14 @@ mod tests {
+         let netty = |arch: &str| {
+             library(
+                 &format!("io.netty:netty-transport-native-kqueue:1:osx-{arch}"),
+-                &format!("io/netty/netty-transport-native-kqueue/1/netty-transport-native-kqueue-1-osx-{arch}.jar"),
++                &format!(
++                    "io/netty/netty-transport-native-kqueue/1/netty-transport-native-kqueue-1-osx-{arch}.jar"
++                ),
+                 &sha1(b"kqueue"),
+-                &format!(r#","rules":[{{"action":"allow","os":{{"name":"{}"}}}}]"#, rule_system()),
++                &format!(
++                    r#","rules":[{{"action":"allow","os":{{"name":"{}"}}}}]"#,
++                    rule_system()
++                ),
+             )
+         };
+         let client_sha1 = digest(&old.join("jars/client.jar"), "sha1").unwrap();
+@@ -1479,17 +1483,21 @@ mod tests {
+             "libraries/net/minecraft/client/9.9/client-9.9.jar",
+             b"other",
+         );
+-        assert!(prepare(&atlauncher)
+-            .unwrap_err()
+-            .contains("is not the pinned file"));
++        assert!(
++            prepare(&atlauncher)
++                .unwrap_err()
++                .contains("is not the pinned file")
++        );
+         put("libraries/net/minecraft/client/9.9/client-9.9.jar", &client);
+         put(
+             "configs/json/minecraft/9.9.json",
+             manifest.replace(',', ", ").as_bytes(),
+         );
+-        assert!(prepare(&atlauncher)
+-            .unwrap_err()
+-            .contains("may have rewritten it"));
++        assert!(
++            prepare(&atlauncher)
++                .unwrap_err()
++                .contains("may have rewritten it")
++        );
+     }
+ 
+     /// A launcher with a layout of its own names each file (`--version-json`, `--client-jar`,
+@@ -1545,13 +1553,17 @@ mod tests {
+             1
+         );
+         // Without them the empty folder has nothing; a wrong jar fails its pin.
+-        assert!(prepare(&Inputs::default())
+-            .unwrap_err()
+-            .starts_with("Missing "));
++        assert!(
++            prepare(&Inputs::default())
++                .unwrap_err()
++                .starts_with("Missing ")
++        );
+         put("instance/minecraft.jar", b"other");
+-        assert!(prepare(&inputs)
+-            .unwrap_err()
+-            .contains("is not the pinned file"));
++        assert!(
++            prepare(&inputs)
++                .unwrap_err()
++                .contains("is not the pinned file")
++        );
+     }
+ 
+     /// With no launcher's files in the chosen folder, the error names where Horizon looked and
+diff --git a/crates/horizon-prepare/src/check.rs b/crates/horizon-prepare/src/check.rs
+index ae95ea85e..c4d2ce688 100644
+--- a/crates/horizon-prepare/src/check.rs
++++ b/crates/horizon-prepare/src/check.rs
+@@ -4,7 +4,7 @@
+ //! stamp out of the output's digest, so it never asks for a new `OUTPUT_VERSION`.
+ 
+ use crate::pyjson::Value;
+-use crate::{artifacts::Lock, read_json, write_json, OUTPUT_VERSION, SCHEMA};
++use crate::{OUTPUT_VERSION, SCHEMA, artifacts::Lock, read_json, write_json};
+ use std::path::Path;
+ 
+ /// The file beside `horizon-resources.json` naming the preparer's `OUTPUT_VERSION`.
+diff --git a/crates/horizon-prepare/src/java.rs b/crates/horizon-prepare/src/java.rs
+index 1279cc6c4..506470798 100644
+--- a/crates/horizon-prepare/src/java.rs
++++ b/crates/horizon-prepare/src/java.rs
+@@ -7,6 +7,29 @@ use std::path::{Path, PathBuf};
+ use std::process::{Command, Stdio};
+ use std::time::{Duration, Instant};
+ 
++/// An interpreter embedded in a platform which cannot launch desktop processes.
++pub trait InProcessJava: Send + Sync {
++    fn home(&self) -> PathBuf;
++    fn major(&self) -> i64;
++    fn release(&self) {}
++    fn run(&self, args: &[String], cwd: Option<&Path>, log: &fs::File) -> Result<(), String>;
++}
++static IN_PROCESS: std::sync::OnceLock<std::sync::Arc<dyn InProcessJava>> =
++    std::sync::OnceLock::new();
++pub fn install_in_process(runtime: std::sync::Arc<dyn InProcessJava>) -> Result<(), String> {
++    IN_PROCESS
++        .set(runtime)
++        .map_err(|_| "Java interpreter already installed".into())
++}
++pub fn release_in_process() {
++    if let Some(runtime) = IN_PROCESS.get() {
++        runtime.release();
++    }
++}
++pub fn in_process_installed() -> bool {
++    IN_PROCESS.get().is_some()
++}
++
+ pub struct Jdk {
+     pub javac: PathBuf,
+     pub java: PathBuf,
+@@ -237,6 +260,20 @@ pub fn find_runtime(major: i64, more: &[PathBuf]) -> Result<Jdk, String> {
+ }
+ 
+ fn find_tools(major: i64, more: &[PathBuf], compiler: bool) -> Result<Jdk, String> {
++    if let Some(runtime) = IN_PROCESS.get() {
++        if compiler {
++            return Err("Preparation support files are damaged. Reinstall the application.".into());
++        }
++        if runtime.major() < major {
++            return Err(format!("Java {major} is required for this game version"));
++        }
++        let bin = runtime.home().join("bin");
++        return Ok(Jdk {
++            java: bin.join("java"),
++            javac: bin.join("javac"),
++        });
++    }
++
+     let tool = if compiler { "javac" } else { "java" };
+     let need = format!(
+         "Java {major} is needed ({tool}, e.g. Eclipse Temurin {major}). \
+@@ -361,6 +398,10 @@ impl Jdk {
+     }
+ 
+     pub fn java(&self, args: &[String], cwd: Option<&Path>, log: &fs::File) -> Result<(), String> {
++        if let Some(runtime) = IN_PROCESS.get() {
++            return runtime.run(args, cwd, log);
++        }
++
+         let mut command = command(&self.java);
+         command.args(BATCH_OPTIONS).args(args);
+         if let Some(dir) = cwd {
+diff --git a/crates/horizon-prepare/src/lib.rs b/crates/horizon-prepare/src/lib.rs
+index 993e41ed7..a1bc2fd74 100644
+--- a/crates/horizon-prepare/src/lib.rs
++++ b/crates/horizon-prepare/src/lib.rs
+@@ -23,9 +23,9 @@ mod sounds;
+ mod survival;
+ mod worker;
+ 
+-pub use check::{check, missing_extras, STAMP};
++pub use check::{STAMP, check, missing_extras};
+ pub use files::clone_or_copy;
+-pub use sounds::{add_assets, fonts, languages, packs, panorama, sounds, BUILT_IN_PACKS};
++pub use sounds::{BUILT_IN_PACKS, add_assets, fonts, languages, packs, panorama, sounds};
+ 
+ use pyjson::Value;
+ use sha2::Digest;
+@@ -452,6 +452,7 @@ impl Run<'_> {
+ 
+     /// Stops an exporter JVM once its lane needs it no more, to free its memory.
+     fn close_worker(&self, worker: usize) {
++        java::release_in_process();
+         drop(self.workers[worker].lock().unwrap().take());
+     }
+ 
+@@ -512,7 +513,8 @@ impl Run<'_> {
+         if !matches!(
+             main,
+             "VanillaCommandParseOracle" | "VanillaCreativeTabsExporter"
+-        ) && std::env::var_os("HORIZON_PREPARE_ISOLATED").is_none()
++        ) && !java::in_process_installed()
++            && std::env::var_os("HORIZON_PREPARE_ISOLATED").is_none()
+         {
+             let name = ["server", "client", "server-blocks"][worker];
+             let mut worker = self.workers[worker].lock().unwrap();
+@@ -1129,19 +1131,24 @@ fn steps(
+             mkdir(&datagen)?;
+             let log_path = datagen.join("datagen.log");
+             let log = run.log_file(&log_path)?;
++            // Import already verifies and extracts the server bundle. Embedded runtimes
++            // invoke the same data generator directly, without its desktop launcher.
++            let mut command = if java::in_process_installed() {
++                vec![
++                    "-cp".into(),
++                    run.server_classpath.clone(),
++                    "net.minecraft.data.Main".into(),
++                ]
++            } else {
++                vec![
++                    "-DbundlerMainClass=net.minecraft.data.Main".into(),
++                    "-jar".into(),
++                    arg(&lock.directory.join("jars").join("server.jar")),
++                ]
++            };
++            command.extend(["--reports".into(), "--output".into(), "out".into()]);
+             run.jdk
+-                .java(
+-                    &[
+-                        "-DbundlerMainClass=net.minecraft.data.Main".into(),
+-                        "-jar".into(),
+-                        arg(&lock.directory.join("jars").join("server.jar")),
+-                        "--reports".into(),
+-                        "--output".into(),
+-                        "out".into(),
+-                    ],
+-                    Some(&datagen),
+-                    &log,
+-                )
++                .java(&command, Some(&datagen), &log)
+                 .map_err(|e| format!("{e} in the data generator; see {}", log_path.display()))?;
+             let reports = datagen.join("out").join("reports");
+             install_datagen_reports(root, &reports)?;
+@@ -1694,10 +1701,12 @@ mod tests {
+                 read(&reports.join(name)).unwrap()
+             );
+         }
+-        assert!(read_json(&root.join("items.json"))
+-            .unwrap()
+-            .get("minecraft:stone")
+-            .is_some());
++        assert!(
++            read_json(&root.join("items.json"))
++                .unwrap()
++                .get("minecraft:stone")
++                .is_some()
++        );
+         assert!(root.join("biome-parameters/overworld.json").is_file());
+         for name in ["registries.json", "commands.json", "items.json"] {
+             fs::remove_file(root.join(name)).unwrap();
+diff --git a/crates/horizon-prepare/src/pool.rs b/crates/horizon-prepare/src/pool.rs
+index f59985626..62e6ed67d 100644
+--- a/crates/horizon-prepare/src/pool.rs
++++ b/crates/horizon-prepare/src/pool.rs
+@@ -1,12 +1,15 @@
+ //! Running independent work at once: the exporter JVMs of each side, the asset copy, hashing.
+ //! `HORIZON_PREPARE_JOBS=1` runs everything one step after another.
+ 
+-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+ use std::sync::Mutex;
++use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+ 
+ /// How many threads each copying, hashing or compiling step spreads over: HORIZON_PREPARE_JOBS,
+ /// else the processors (at most 8). With 1 the lanes run one after another too.
+ pub(crate) fn jobs() -> usize {
++    if crate::java::in_process_installed() {
++        return 1;
++    }
+     std::env::var("HORIZON_PREPARE_JOBS")
+         .ok()
+         .and_then(|n| n.trim().parse::<usize>().ok())
+diff --git a/crates/horizon-prepare/src/sounds.rs b/crates/horizon-prepare/src/sounds.rs
+index f702985ac..abbaadba5 100644
+--- a/crates/horizon-prepare/src/sounds.rs
++++ b/crates/horizon-prepare/src/sounds.rs
+@@ -5,7 +5,7 @@
+ 
+ use crate::artifacts::{self, Inputs, Lock};
+ use crate::pyjson::Value;
+-use crate::{digest, Log};
++use crate::{Log, digest};
+ use std::collections::{HashMap, HashSet};
+ use std::fs;
+ use std::path::{Path, PathBuf};
+@@ -564,9 +564,11 @@ mod tests {
+             lines.borrow_mut().push(l.to_string())
+         })
+         .unwrap();
+-        assert!(fs::read(target.join("assets/pack.mcmeta"))
+-            .unwrap()
+-            .starts_with(b"{\"language\""));
++        assert!(
++            fs::read(target.join("assets/pack.mcmeta"))
++                .unwrap()
++                .starts_with(b"{\"language\"")
++        );
+         assert_eq!(
+             fs::read(target.join("assets/minecraft/lang/fr_fr.json")).unwrap(),
+             b"{}"
+@@ -597,15 +599,17 @@ mod tests {
+             version_json: Some(version_json.clone()),
+             ..Default::default()
+         };
+-        assert!(add_assets(
+-            "languages",
+-            &f.root,
+-            None,
+-            Some(&empty),
+-            &only_json,
+-            &|_| {}
+-        )
+-        .is_err());
++        assert!(
++            add_assets(
++                "languages",
++                &f.root,
++                None,
++                Some(&empty),
++                &only_json,
++                &|_| {}
++            )
++            .is_err()
++        );
+         let inputs = crate::artifacts::Inputs {
+             version_json: Some(version_json),
+             assets_dir: Some(store),
+@@ -613,9 +617,11 @@ mod tests {
+         };
+         let target =
+             add_assets("languages", &f.root, None, Some(&empty), &inputs, &|_| {}).unwrap();
+-        assert!(fs::read(target.join("assets/pack.mcmeta"))
+-            .unwrap()
+-            .starts_with(b"{\"language\""));
++        assert!(
++            fs::read(target.join("assets/pack.mcmeta"))
++                .unwrap()
++                .starts_with(b"{\"language\"")
++        );
+     }
+ 
+     /// #1076: the launcher holds an index Mojang republished under the same id, so its SHA-1
+@@ -669,10 +675,11 @@ mod tests {
+         fs::write(f.object(1), b"not the sound").unwrap();
+         let error = f.run().unwrap_err();
+         assert!(error.starts_with("Corrupt asset object"), "{error}");
+-        assert!(!f
+-            .root
+-            .join(".local/horizon-client/9.9/assets/minecraft/sounds/ambient/cave1.ogg")
+-            .exists());
++        assert!(
++            !f.root
++                .join(".local/horizon-client/9.9/assets/minecraft/sounds/ambient/cave1.ogg")
++                .exists()
++        );
+         fs::remove_file(f.object(1)).unwrap();
+         assert!(f.run().unwrap_err().starts_with("Missing asset object"));
+     }
+@@ -710,14 +717,18 @@ mod tests {
+             .join(f.objects[FIRST_FACE].0);
+         fs::create_dir_all(path.parent().unwrap()).unwrap();
+         fs::write(&path, b"placeholder").unwrap();
+-        assert!(panorama(&f.root, Some(&f.minecraft), &|_| {})
+-            .unwrap_err()
+-            .starts_with("Corrupt asset object"));
++        assert!(
++            panorama(&f.root, Some(&f.minecraft), &|_| {})
++                .unwrap_err()
++                .starts_with("Corrupt asset object")
++        );
+         assert_eq!(fs::read(path).unwrap(), b"placeholder");
+         fs::remove_file(f.object(FIRST_FACE)).unwrap();
+-        assert!(panorama(&f.root, Some(&f.minecraft), &|_| {})
+-            .unwrap_err()
+-            .starts_with("Missing asset object"));
++        assert!(
++            panorama(&f.root, Some(&f.minecraft), &|_| {})
++                .unwrap_err()
++                .starts_with("Missing asset object")
++        );
+     }
+ 
+     #[test]
+@@ -833,9 +844,11 @@ mod tests {
+         for (name, data) in &f.objects[FIRST_PACK..FIRST_FACE] {
+             assert_eq!(&fs::read(target.join("assets").join(name)).unwrap(), data);
+         }
+-        assert!(target
+-            .join("assets/minecraft/resourcepacks/programmer_art.zip")
+-            .is_file());
++        assert!(
++            target
++                .join("assets/minecraft/resourcepacks/programmer_art.zip")
++                .is_file()
++        );
+         assert_eq!(
+             *lines.borrow(),
+             ["Built-in pack assets ready: 2 files, 0.0 MB"]
+@@ -901,10 +914,12 @@ mod tests {
+             lines.borrow_mut().push(line.to_string())
+         });
+         assert_eq!(lines.borrow().len(), 4);
+-        assert!(lines
+-            .borrow()
+-            .iter()
+-            .all(|line| line.contains("assets ready")));
++        assert!(
++            lines
++                .borrow()
++                .iter()
++                .all(|line| line.contains("assets ready"))
++        );
+         assets
+             .copy(is_sound, "Sound", &["minecraft/sounds.json"], &|_| {})
+             .unwrap();
 diff --git a/crates/horizon-threads/src/memory_limit.rs b/crates/horizon-threads/src/memory_limit.rs
 index 68c8c5b6e..bc5b745a7 100644
 --- a/crates/horizon-threads/src/memory_limit.rs

@@ -13,6 +13,8 @@ use winit::{
 
 unsafe extern "C" {
     fn hz_documents() -> *const c_char;
+    fn hz_bundle() -> *const c_char;
+    fn hz_setup_busy(busy: bool);
     fn hz_attach(view: *mut c_void, importer: bool);
     fn hz_mode(playing: bool);
     fn hz_poll(input: *mut Input) -> bool;
@@ -35,6 +37,11 @@ pub fn documents() -> PathBuf {
 pub fn initialize() -> std::io::Result<()> {
     let home = documents();
     std::fs::create_dir_all(&home)?;
+    let resources = home.join("resources");
+    let previous = resources.with_extension("previous");
+    if !resources.exists() && previous.exists() {
+        std::fs::rename(previous, resources)?;
+    }
     std::env::set_current_dir(&home)?;
     // Called before any worker threads exist, so changing the environment is safe.
     unsafe {
@@ -175,33 +182,117 @@ fn tick_setup() {
     let busy = busy.clone();
     let home = documents();
     let saved = saved_account();
-    let spawned = std::thread::Builder::new().name("Microsoft sign-in".into()).spawn(move || {
-        let run = || -> Result<(), String> {
-            let client = option_env!("HORIZON_MSA_CLIENT_ID").unwrap_or("");
-            let installer = crate::setup::Installer::default();
-            let cancelled = AtomicBool::new(false);
-            let device = |code: &str, url: &str| {
-                if let (Ok(code), Ok(url)) = (CString::new(code), CString::new(url)) {
-                    unsafe { hz_setup_device(code.as_ptr(), url.as_ptr()); }
+    let kit = PathBuf::from(string(unsafe { hz_bundle() })).join("PrepareKit");
+    unsafe {
+        hz_setup_busy(true);
+    }
+    let spawned = std::thread::Builder::new()
+        .name("Microsoft sign-in".into())
+        .spawn(move || {
+            let run = || -> Result<(), String> {
+                let client = option_env!("HORIZON_MSA_CLIENT_ID").unwrap_or("");
+                let installer = crate::setup::Installer::default();
+                let cancelled = AtomicBool::new(false);
+                let device = |code: &str, url: &str| {
+                    if let (Ok(code), Ok(url)) = (CString::new(code), CString::new(url)) {
+                        unsafe {
+                            hz_setup_device(code.as_ptr(), url.as_ptr());
+                        }
+                    }
+                };
+                let result = installer.sign_in(
+                    client,
+                    saved["refresh"].as_str(),
+                    &cancelled,
+                    &setup_status,
+                    &device,
+                );
+                let mut session = match result {
+                    Err(_) if saved["refresh"].is_string() => {
+                        installer.sign_in(client, None, &cancelled, &setup_status, &device)?
+                    }
+                    other => other?,
+                };
+                session.json["refresh"] = session.refresh.into();
+                let text =
+                    CString::new(session.json.to_string()).map_err(|_| "Invalid account data")?;
+                if !unsafe { hz_secret_set(text.as_ptr()) } {
+                    return Err("Could not save your account in Keychain.".into());
                 }
+                if home.join("resources/horizon-resources.json").is_file() {
+                    setup_status("Signed in. Close and reopen Horizon to use this account.");
+                    return Ok(());
+                }
+                installer.download_game(&home.join("minecraft"), &cancelled, &setup_status)?;
+                let runtime = home.join(".horizon-java");
+                if !horizon_ios_bootstrap::runtime_ready(&runtime) {
+                    setup_status("Downloading Java class libraries for on-device preparation…");
+                    let spec = horizon_ios_bootstrap::runtime_spec();
+                    let archive = home.join(".horizon-java.tar.gz");
+                    installer.download(
+                        spec["url"].as_str().ok_or("Missing runtime URL")?,
+                        spec["sha256"].as_str().ok_or("Missing runtime checksum")?,
+                        spec["size"].as_u64().ok_or("Missing runtime size")?,
+                        &archive,
+                        &cancelled,
+                    )?;
+                    setup_status("Installing preparation class libraries…");
+                    horizon_ios_bootstrap::install_runtime(&archive, &runtime)?;
+                    std::fs::remove_file(archive).map_err(|e| e.to_string())?;
+                }
+                let writable_kit = home.join(".horizon-prepare");
+                copy_kit(&kit, &writable_kit)?;
+                let log = std::fs::File::create(home.join("preparation.log"))
+                    .map_err(|e| e.to_string())?;
+                setup_status("Preparing resources on this iPhone. Keep Horizon open…");
+                horizon_ios_bootstrap::prepare(
+                    &writable_kit,
+                    &home.join("minecraft"),
+                    &runtime,
+                    &home.join("resources"),
+                    &|p| {
+                        setup_status(&format!(
+                            "Preparing resources on this iPhone: {:.0}%",
+                            p * 100.0
+                        ))
+                    },
+                    &log,
+                )?;
+                setup_status(
+                    "Setup complete. Close and reopen Horizon to play. No computer is needed.",
+                );
+                Ok(())
             };
-            let result = installer.sign_in(client, saved["refresh"].as_str(), &cancelled, &setup_status, &device);
-            let mut session = match result {
-                Err(_) if saved["refresh"].is_string() => installer.sign_in(client, None, &cancelled, &setup_status, &device)?,
-                other => other?,
-            };
-            session.json["refresh"] = session.refresh.into();
-            let text = CString::new(session.json.to_string()).map_err(|_| "Invalid account data")?;
-            if !unsafe { hz_secret_set(text.as_ptr()) } { return Err("Could not save your account in Keychain.".into()); }
-            installer.download_game(&home.join("minecraft"), &cancelled, &setup_status)?;
-            setup_status("Official files downloaded. Horizon's generated gameplay tables still require desktop preparation; import the prepared folder to play.");
-            Ok(())
-        };
-        if let Err(error) = run() { setup_status(&error); }
-        busy.store(false, Ordering::Relaxed);
-    });
+            if let Err(error) = run() {
+                setup_status(&error);
+            }
+            unsafe {
+                hz_setup_busy(false);
+            }
+            busy.store(false, Ordering::Relaxed);
+        });
     if spawned.is_err() {
+        unsafe {
+            hz_setup_busy(false);
+        }
         BUSY.get().unwrap().store(false, Ordering::Relaxed);
         setup_status("Could not start sign-in. Restart Horizon and retry.");
     }
+}
+
+fn copy_kit(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(from).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        if kind.is_dir() {
+            copy_kit(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), target).map_err(|e| e.to_string())?;
+        } else {
+            return Err("Invalid preparation kit entry".into());
+        }
+    }
+    Ok(())
 }
