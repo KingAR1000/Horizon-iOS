@@ -9,7 +9,7 @@ jobs:
     timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always
-      HORIZON_MSA_CLIENT_ID: ${{ vars.HORIZON_MSA_CLIENT_ID }}
+      HORIZON_MSA_CLIENT_ID: ${{ vars.HORIZON_MSA_CLIENT_ID || '331e08f8-172d-43b9-835a-3108c2fcdbf3' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
