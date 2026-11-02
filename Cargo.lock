@@ -1073,7 +1073,6 @@ dependencies = [
  "horizon-core",
  "horizon-friends",
  "horizon-hdr",
- "horizon-ios-platform",
  "horizon-items",
  "horizon-mods",
  "horizon-narrator",
@@ -1122,7 +1121,6 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "horizon-client-core",
- "horizon-ios-platform",
  "horizon-theme",
  "png",
  "winit",
@@ -1287,6 +1285,9 @@ name = "horizon-ios-platform"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "serde_json",
+ "sha1",
+ "ureq",
  "winit",
 ]
 
@@ -3475,6 +3476,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]

@@ -40,6 +40,30 @@ pub fn initialize() -> std::io::Result<()> {
     unsafe {
         std::env::set_var("HORIZON_HOME", &home);
     }
+    let mut account = saved_account();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if account["expires_at"]
+        .as_u64()
+        .is_some_and(|expires| expires > now + 60)
+    {
+        account.as_object_mut().map(|v| v.remove("refresh"));
+        let path = std::env::temp_dir().join("horizon-session.json");
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(account.to_string().as_bytes())?;
+        unsafe {
+            std::env::set_var("HORIZON_SESSION_FILE", path);
+        }
+    }
     // Conservative first-run defaults; later changes are owned by Horizon's settings UI.
     if !home.join("options.txt").exists() {
         std::fs::write(
@@ -71,6 +95,7 @@ pub fn playing(value: bool) {
     }
 }
 pub fn poll() -> Option<Input> {
+    tick_setup();
     let mut event = Input::default();
     unsafe { hz_poll(&mut event) }.then_some(event)
 }
@@ -103,6 +128,12 @@ pub fn import_screen() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            tick_setup();
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(100),
+            ));
+        }
     }
     EventLoop::new()?.run_app(&mut Importer(None))?;
     Ok(())
@@ -112,4 +143,65 @@ unsafe extern "C" {
 }
 pub fn active() -> bool {
     unsafe { hz_active() }
+}
+
+unsafe extern "C" {
+    fn hz_setup_requested() -> bool;
+    fn hz_setup_status(text: *const c_char);
+    fn hz_setup_device(code: *const c_char, url: *const c_char);
+    fn hz_secret_get() -> *const c_char;
+    fn hz_secret_set(json: *const c_char) -> bool;
+}
+fn setup_status(text: &str) {
+    if let Ok(text) = CString::new(text) {
+        unsafe {
+            hz_setup_status(text.as_ptr());
+        }
+    }
+}
+fn saved_account() -> serde_json::Value {
+    serde_json::from_str(&string(unsafe { hz_secret_get() })).unwrap_or_default()
+}
+fn tick_setup() {
+    use std::sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    };
+    static BUSY: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+    let busy = BUSY.get_or_init(|| Arc::new(AtomicBool::new(false)));
+    if !unsafe { hz_setup_requested() } || busy.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let busy = busy.clone();
+    let home = documents();
+    let saved = saved_account();
+    let spawned = std::thread::Builder::new().name("Microsoft sign-in".into()).spawn(move || {
+        let run = || -> Result<(), String> {
+            let client = option_env!("HORIZON_MSA_CLIENT_ID").unwrap_or("");
+            let installer = crate::setup::Installer::default();
+            let cancelled = AtomicBool::new(false);
+            let device = |code: &str, url: &str| {
+                if let (Ok(code), Ok(url)) = (CString::new(code), CString::new(url)) {
+                    unsafe { hz_setup_device(code.as_ptr(), url.as_ptr()); }
+                }
+            };
+            let result = installer.sign_in(client, saved["refresh"].as_str(), &cancelled, &setup_status, &device);
+            let mut session = match result {
+                Err(_) if saved["refresh"].is_string() => installer.sign_in(client, None, &cancelled, &setup_status, &device)?,
+                other => other?,
+            };
+            session.json["refresh"] = session.refresh.into();
+            let text = CString::new(session.json.to_string()).map_err(|_| "Invalid account data")?;
+            if !unsafe { hz_secret_set(text.as_ptr()) } { return Err("Could not save your account in Keychain.".into()); }
+            installer.download_game(&home.join("minecraft"), &cancelled, &setup_status)?;
+            setup_status("Official files downloaded. Horizon's generated gameplay tables still require desktop preparation; import the prepared folder to play.");
+            Ok(())
+        };
+        if let Err(error) = run() { setup_status(&error); }
+        busy.store(false, Ordering::Relaxed);
+    });
+    if spawned.is_err() {
+        BUSY.get().unwrap().store(false, Ordering::Relaxed);
+        setup_status("Could not start sign-in. Restart Horizon and retry.");
+    }
 }

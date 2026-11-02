@@ -1,5 +1,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=src/ios.m");
+    println!("cargo:rerun-if-env-changed=HORIZON_MSA_CLIENT_ID");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios") {
         cc::Build::new()
             .file("src/ios.m")
@@ -9,6 +10,7 @@ fn main() {
         for framework in [
             "UIKit",
             "Foundation",
+            "Security",
             "UniformTypeIdentifiers",
             "AVFoundation",
         ] {

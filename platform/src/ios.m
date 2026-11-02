@@ -1,12 +1,14 @@
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <AVFoundation/AVFoundation.h>
+#import <Security/Security.h>
 
 // UIKit and Rust consume this queue on the same main thread.
 typedef struct { int kind, code; double x, y; } HZInput;
 static HZInput events[512];
 static unsigned head, tail;
 static NSString *returned;
+static BOOL setupRequested;
 static UIBackgroundTaskIdentifier backgroundTask;
 static void emit(int kind, int code, double x, double y) {
     unsigned next = (head + 1) % 512;
@@ -75,6 +77,7 @@ static HZOverlay *overlay;
 }
 - (void)down:(UIButton *)b {
     if (b.tag == 100) { if (self.isFirstResponder) [self resignFirstResponder]; else [self becomeFirstResponder]; return; }
+    if (b.tag == 102) { setupRequested=YES; return; }
     if (b.tag == 101) { [self importResources]; return; }
     emit(b.tag >= 20 ? 2 : 1, (int)b.tag,1,0);
 }
@@ -117,7 +120,8 @@ static HZOverlay *overlay;
     self.look.frame=CGRectMake(CGRectGetMidX(r),top,r.size.width/2,r.size.height-80);
     self.stick.frame=CGRectMake(left,bottom-145,120,120);
     for (UIButton *b in self.buttons) {
-        b.hidden = self.importing ? b.tag != 101 : (!self.playing && b.tag != 8 && b.tag != 100 && b.tag != 21);
+        b.hidden = self.importing ? (b.tag != 101 && b.tag != 102) : (!self.playing && b.tag != 8 && b.tag != 100 && b.tag != 21 && b.tag != 102);
+        if (b.tag == 102 && self.playing) b.hidden=YES;
         switch (b.tag) {
             case 4:b.frame=CGRectMake(right-70,bottom-70,70,60);break;
             case 5:b.frame=CGRectMake(right-150,bottom-70,70,60);break;
@@ -131,6 +135,7 @@ static HZOverlay *overlay;
             case 22:b.frame=CGRectMake(CGRectGetMidX(r)-105,bottom-45,45,40);break;
             case 23:b.frame=CGRectMake(CGRectGetMidX(r)+60,bottom-45,45,40);break;
             case 100:b.frame=CGRectMake(left+145,top,90,40);break;
+            case 102:b.frame=CGRectMake(CGRectGetMidX(r)-125,self.importing ? CGRectGetMidY(r)+100 : top,250,44);break;
             case 101:b.frame=CGRectMake(CGRectGetMidX(r)-125,CGRectGetMidY(r)+40,250,50);break;
         }
     }
@@ -184,11 +189,17 @@ void hz_attach(void *view, bool importer) {
     overlay=[[HZOverlay alloc] initWithFrame:parent.bounds];
     overlay.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
     overlay.importing=importer;
+    [overlay button:@"Sign in with Microsoft" code:102];
     if (importer) {
         overlay.backgroundColor=[UIColor colorWithRed:0.07 green:0.10 blue:0.15 alpha:1];
         overlay.message=[UILabel new]; overlay.message.numberOfLines=0; overlay.message.textColor=UIColor.whiteColor; overlay.message.textAlignment=NSTextAlignmentCenter;
         overlay.message.text=NSLocalizedString(@"Horizon needs resources prepared from your own Minecraft installation. Select the exported resource folder in Files.",nil);
         [overlay addSubview:overlay.message]; [overlay button:@"Import resources" code:101];
+    }
+    if (!overlay.message) {
+        overlay.message=[UILabel new]; overlay.message.numberOfLines=0; overlay.message.textColor=UIColor.whiteColor;
+        overlay.message.backgroundColor=[UIColor colorWithWhite:0 alpha:0.65]; overlay.message.hidden=YES;
+        [overlay addSubview:overlay.message];
     }
     [parent addSubview:overlay]; [overlay setNeedsLayout];
 }
@@ -196,3 +207,41 @@ void hz_mode(bool playing) {
     if (overlay.playing != playing) { overlay.playing=playing; [overlay reset]; [overlay setNeedsLayout]; }
 }
 bool hz_active(void) { return UIApplication.sharedApplication.applicationState == UIApplicationStateActive; }
+
+bool hz_setup_requested(void) { BOOL value=setupRequested; setupRequested=NO; return value; }
+void hz_setup_status(const char *text) {
+    NSString *message=[NSString stringWithUTF8String:text];
+    dispatch_async(dispatch_get_main_queue(), ^{ overlay.message.hidden=NO; overlay.message.text=NSLocalizedString(message,nil); });
+}
+void hz_setup_device(const char *code, const char *uri) {
+    NSString *message=[NSString stringWithFormat:NSLocalizedString(@"Enter code %@ at microsoft.com/link",nil),[NSString stringWithUTF8String:code]];
+    NSURL *url=[NSURL URLWithString:[NSString stringWithUTF8String:uri]];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        overlay.message.hidden=NO; overlay.message.text=message;
+        if ([url.scheme isEqualToString:@"https"] && [url.host isEqualToString:@"www.microsoft.com"]) {
+            UIAlertController *alert=[UIAlertController alertControllerWithTitle:NSLocalizedString(@"Microsoft sign-in",nil) message:message preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"Continue in browser",nil) style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
+            }]];
+            [overlay.controller presentViewController:alert animated:YES completion:nil];
+        }
+    });
+}
+static NSDictionary *secretQuery(void) { return @{(__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,(__bridge id)kSecAttrService:@"io.github.kingar1000.horizon.account",(__bridge id)kSecAttrAccount:@"microsoft"}; }
+const char *hz_secret_get(void) {
+    NSMutableDictionary *query=[secretQuery() mutableCopy]; query[(__bridge id)kSecReturnData]=@YES;
+    CFTypeRef value=NULL;
+    if (SecItemCopyMatching((__bridge CFDictionaryRef)query,&value)!=errSecSuccess) return NULL;
+    NSData *data=CFBridgingRelease(value); returned=[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]; return returned.UTF8String;
+}
+bool hz_secret_set(const char *text) {
+    NSData *data=[[NSString stringWithUTF8String:text] dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *attributes=@{(__bridge id)kSecValueData:data};
+    OSStatus result=SecItemUpdate((__bridge CFDictionaryRef)secretQuery(),(__bridge CFDictionaryRef)attributes);
+    if (result==errSecItemNotFound) {
+        NSMutableDictionary *query=[secretQuery() mutableCopy]; [query addEntriesFromDictionary:attributes];
+        query[(__bridge id)kSecAttrAccessible]=(__bridge id)kSecAttrAccessibleWhenUnlockedThisDeviceOnly;
+        result=SecItemAdd((__bridge CFDictionaryRef)query,NULL);
+    }
+    return result==errSecSuccess;
+}

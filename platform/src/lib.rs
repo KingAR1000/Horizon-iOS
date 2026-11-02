@@ -17,3 +17,5 @@ pub struct Input {
     pub x: f64,
     pub y: f64,
 }
+
+pub mod setup;
