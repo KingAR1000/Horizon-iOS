@@ -1,0 +1,33 @@
+# Horizon for iPhone
+
+An iOS integration of [Horizon](https://github.com/horizon-rust/horizon), using its real Rust gameplay and wgpu Metal renderer. iOS 16+, arm64 iPhone. The engine is pinned as a submodule; `patches/ios.patch` contains the platform changes. MIT; upstream attribution and bundled dependency licenses are retained.
+
+## Install
+
+Run **Actions → Build unsigned iOS IPA → Run workflow**, then download the `Horizon-unsigned` artifact. Sign `Horizon-unsigned.ipa` with SideStore, AltStore, or your preferred signing tool and install it. No Apple account or certificate is used by the build.
+
+Prepare resources from your own Minecraft installation using the pinned engine's [build instructions](engine/README.md#build-from-source) on a desktop. Copy the resulting folder containing `horizon-resources.json` to Files on the phone. On first launch select **Import resources**, choose that folder, then close and reopen Horizon. Game files, saves, settings and logs live in Horizon's Documents folder, accessible through Files/Finder. Proprietary game resources are never distributed here.
+
+Move with the left touch pad, drag the right half to look, and use the labeled action buttons. Tap menus directly; **Keyboard** opens text input. The arrow buttons cycle hotbar slots. Graphics settings are adjustable in game; start with the conservative defaults on older phones.
+
+## Build
+
+On macOS with Xcode 16.4 and Rust installed:
+
+```sh
+git clone --recurse-submodules https://github.com/KingAR1000/Horizon-iOS.git
+cd Horizon-iOS
+./scripts/build.sh
+```
+
+The script applies the pinned patch, builds with the committed lockfile and Rust toolchain, and packages `build/Horizon-unsigned.ipa`. The workflow is manual only.
+
+## JIT and memory
+
+Horizon compiles Rust gameplay ahead of time to native ARM64. It has no JVM or gameplay bytecode interpreter: JIT activation provides no benefit and is unnecessary, including when Apple's code-signing restrictions prohibit JIT. Metal shaders compile through Apple's system APIs. Desktop native code mods cannot be compiled or loaded on-device; statically linked Rust mods require a rebuild.
+
+`ios/Memory.entitlements` supplies optional increased-memory and virtual-address-space requests for signing profiles that support them. Ordinary free-account signing may strip or reject these entitlements; the standard IPA does not require them. Neither these requests nor JIT tools disable iOS's memory limits. Use short render distances; iOS can terminate memory-heavy worlds.
+
+## Limitations
+
+This port is under validation; a successful package build does not establish on-device gameplay stability. No physical iPhone testing has been performed. Desktop launcher/account sign-in, narrator and gamepad integration are not ported. Offline-mode multiplayer is available through Horizon; authenticated servers require an upstream-compatible session. Resource preparation requires a desktop. Suspension saves the integrated server and pauses play, but iOS can terminate the app without allowing a final save. Upstream feature and compatibility limitations also apply.

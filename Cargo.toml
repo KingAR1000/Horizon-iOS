@@ -1,0 +1,24 @@
+[package]
+name = "horizon-ios"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.99"
+
+[workspace]
+members = ["platform"]
+exclude = ["engine"]
+
+[dependencies]
+horizon-client = { path = "engine/crates/horizon-client", default-features = false, features = ["audio", "system-allocator"] }
+horizon-ios-platform = { path = "platform" }
+
+[patch.crates-io]
+wgpu-hal = { path = "engine/third_party/wgpu-hal" }
+naga = { path = "engine/third_party/naga" }
+libmimalloc-sys = { path = "engine/third_party/libmimalloc-sys" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

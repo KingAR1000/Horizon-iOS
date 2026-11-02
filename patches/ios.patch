@@ -1,0 +1,482 @@
+diff --git a/crates/horizon-client-input/Cargo.toml b/crates/horizon-client-input/Cargo.toml
+index e1d7cf72b..2efd8a6d2 100644
+--- a/crates/horizon-client-input/Cargo.toml
++++ b/crates/horizon-client-input/Cargo.toml
+@@ -12,7 +12,7 @@ winit = "0.30.13"
+ # The window icon.
+ horizon-theme = { path = "../horizon-theme" }
+ png = "0.18"
+-arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
++
+ # The DualSense's trigger effects (the `controllers` feature).
+ horizon-dualsense = { path = "../horizon-dualsense", optional = true }
+ 
+@@ -21,3 +21,9 @@ controllers = ["dep:horizon-dualsense"]
+ 
+ [lints]
+ workspace = true
++
++[target.'cfg(target_os = "ios")'.dependencies]
++horizon-ios-platform = { path = "../../../platform" }
++
++[target.'cfg(not(target_os = "ios"))'.dependencies]
++arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+diff --git a/crates/horizon-client-input/src/clipboard.rs b/crates/horizon-client-input/src/clipboard.rs
+index eaf2a2274..214e793ee 100644
+--- a/crates/horizon-client-input/src/clipboard.rs
++++ b/crates/horizon-client-input/src/clipboard.rs
+@@ -123,6 +123,7 @@ pub trait Clipboard {
+ /// data-control protocol and falls back to X11 (XWayland) on compositors
+ /// without it. When no system clipboard can be reached, text copied in the
+ /// game can still be pasted in the game.
++#[cfg(not(target_os = "ios"))]
+ #[derive(Default)]
+ pub struct SystemClipboard {
+     system: Option<arboard::Clipboard>,
+@@ -130,6 +131,7 @@ pub struct SystemClipboard {
+     copied: Option<String>,
+ }
+ 
++#[cfg(not(target_os = "ios"))]
+ impl SystemClipboard {
+     /// The text last copied by the game.
+     pub fn copied(&self) -> Option<&str> {
+@@ -143,6 +145,7 @@ impl SystemClipboard {
+     }
+ }
+ 
++#[cfg(not(target_os = "ios"))]
+ impl Clipboard for SystemClipboard {
+     fn get(&mut self) -> String {
+         let Some(system) = self.system() else {
+@@ -491,3 +494,27 @@ mod tests {
+         assert_eq!(value, "ok");
+     }
+ }
++
++#[cfg(target_os = "ios")]
++#[derive(Default)]
++pub struct SystemClipboard {
++    copied: Option<String>,
++}
++#[cfg(target_os = "ios")]
++impl SystemClipboard {
++    pub fn copied(&self) -> Option<&str> {
++        self.copied.as_deref()
++    }
++}
++#[cfg(target_os = "ios")]
++impl Clipboard for SystemClipboard {
++    fn get(&mut self) -> String {
++        horizon_ios_platform::clipboard_get()
++    }
++    fn set(&mut self, text: &str) {
++        if !text.is_empty() {
++            self.copied = Some(text.to_owned());
++            horizon_ios_platform::clipboard_set(text);
++        }
++    }
++}
+diff --git a/crates/horizon-client-lib/Cargo.toml b/crates/horizon-client-lib/Cargo.toml
+index 47a355838..f87829754 100644
+--- a/crates/horizon-client-lib/Cargo.toml
++++ b/crates/horizon-client-lib/Cargo.toml
+@@ -98,7 +98,7 @@ objc2 = "0.6"
+ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow", "NSScreen"] }
+ objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString"] }
+ 
+-[target.'cfg(not(target_os = "macos"))'.dependencies]
++[target.'cfg(not(any(target_os = "macos", target_os = "ios")))'.dependencies]
+ # OpenGL (WGL on Windows, EGL on Linux), the last fallback, for GPUs with no Vulkan or
+ # DirectX 12 driver (`graphicsApi`, graphics.rs).
+ wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
+diff --git a/crates/horizon-client-render/Cargo.toml b/crates/horizon-client-render/Cargo.toml
+index a687de88b..1079eb550 100644
+--- a/crates/horizon-client-render/Cargo.toml
++++ b/crates/horizon-client-render/Cargo.toml
+@@ -61,7 +61,7 @@ rustix = { version = "1", default-features = false, features = ["std", "time"] }
+ [target.'cfg(windows)'.dependencies]
+ wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
+ 
+-[target.'cfg(not(target_os = "macos"))'.dependencies]
++[target.'cfg(not(any(target_os = "macos", target_os = "ios")))'.dependencies]
+ wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
+ 
+ [features]
+diff --git a/crates/horizon-client-render/src/gfx.rs b/crates/horizon-client-render/src/gfx.rs
+index 651678949..bc820489e 100644
+--- a/crates/horizon-client-render/src/gfx.rs
++++ b/crates/horizon-client-render/src/gfx.rs
+@@ -1497,6 +1497,9 @@ impl wgpu::rwh::HasDisplayHandle for WindowDisplay {
+ /// the renderer's start (#746). macOS has Metal only.
+ fn backend_order(api: GraphicsApi, os: &str, wgpu_backend: bool) -> Vec<wgpu::Backends> {
+     use wgpu::Backends;
++    if os == "ios" {
++        return vec![Backends::METAL];
++    }
+     if os == "macos" || wgpu_backend {
+         return vec![Backends::default()];
+     }
+@@ -1806,12 +1809,12 @@ async fn open_backend(
+         memory_hints: wgpu::MemoryHints::MemoryUsage,
+         ..Default::default()
+     };
+-    #[cfg(not(target_os = "macos"))]
++    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+     let opened = match info.backend {
+         wgpu::Backend::Vulkan => horizon_hdr::open_vulkan_device(&adapter, &desc),
+         _ => None,
+     };
+-    #[cfg(target_os = "macos")]
++    #[cfg(any(target_os = "macos", target_os = "ios"))]
+     let opened = None;
+     let opened = match opened {
+         Some(opened) => opened,
+@@ -1850,7 +1853,7 @@ async fn open_backend(
+ const NO_GPU_DRIVER: &str = "No graphics driver with Vulkan, DirectX 12 or OpenGL found: Horizon needs \
+      a GPU driver with one of them. Install the latest driver for your NVIDIA, AMD or Intel GPU and \
+      start the game again";
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ const NO_GPU_DRIVER: &str = "No Metal graphics device found";
+ #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+ const NO_GPU_DRIVER: &str = "No Vulkan or OpenGL graphics driver found: Horizon needs the Vulkan loader \
+diff --git a/crates/horizon-client/Cargo.toml b/crates/horizon-client/Cargo.toml
+index 9a0d575d2..f78af4a77 100644
+--- a/crates/horizon-client/Cargo.toml
++++ b/crates/horizon-client/Cargo.toml
+@@ -96,7 +96,7 @@ objc2 = "0.6"
+ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow", "NSScreen"] }
+ objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString"] }
+ 
+-[target.'cfg(not(target_os = "macos"))'.dependencies]
++[target.'cfg(not(any(target_os = "macos", target_os = "ios")))'.dependencies]
+ # OpenGL (WGL on Windows, EGL on Linux), the last fallback, for GPUs with no Vulkan or
+ # DirectX 12 driver (`graphicsApi`, graphics.rs).
+ wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
+@@ -145,3 +145,6 @@ horizon-client-render = { path = "../horizon-client-render", features = ["test-s
+ horizon-items = { path = "../horizon-items", features = ["test-support"] }
+ # Every WGSL shader translated as wgpu's DirectX 12 backend does (gfx.rs tests).
+ naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out", "msl-out", "spv-out"] }
++
++[target.'cfg(target_os = "ios")'.dependencies]
++horizon-ios-platform = { path = "../../../platform" }
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index b1790c92f..0b49ad57b 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -337,6 +337,8 @@ mod world_loading;
+ mod zombie_reinforcements;
+ mod zombie_villagers;
+ use event_loop::EventLoopCtl;
++#[cfg(target_os = "ios")]
++mod ios;
+ use horizon_client::spans::startup;
+ use horizon_client::{
+     Result,
+@@ -397,6 +399,8 @@ use horizon_world::{
+     },
+     registry::BlockStateId,
+ };
++#[cfg(target_os = "ios")]
++use ios::ios_touch_events;
+ pub use maps::{NativeMapDecoration, NativeMapInfo};
+ pub use native_block_entity_draw::BlockEntityDraw;
+ pub use native_claimed_items::{NativeHeldItem, NativeHit, NativeModEvent};
+@@ -16524,7 +16528,15 @@ fn autosave_interval(rate: f32) -> i64 {
+ }
+ impl ApplicationHandler for Game<'_> {
+     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
++        #[cfg(target_os = "ios")]
++        {
++            horizon_ios_platform::background(false);
++        }
+         if self.window.is_some() {
++            #[cfg(target_os = "ios")]
++            {
++                self.previous = Instant::now();
++            }
+             return;
+         }
+         // The Window constructor: created fullscreen when options.txt or --fullscreen says so.
+@@ -16555,6 +16567,8 @@ impl ApplicationHandler for Game<'_> {
+             }
+         };
+         drop(window_step);
++        #[cfg(target_os = "ios")]
++        horizon_ios_platform::attach(&window, false);
+         horizon_client::telemetry::note_display(&window);
+         match self.new_renderer(window.clone()) {
+             Ok(r) => {
+@@ -16574,6 +16588,13 @@ impl ApplicationHandler for Game<'_> {
+         self.previous = Instant::now();
+     }
+     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
++        #[cfg(target_os = "ios")]
++        if let WindowEvent::Touch(touch) = &event {
++            for event in ios_touch_events(touch) {
++                self.handle_window_event(event_loop, id, event, input_trace::InputOrigin::User);
++            }
++            return;
++        }
+         let key = if self.window.as_ref().is_some_and(|w| w.id() == id)
+             && let WindowEvent::KeyboardInput {
+                 event,
+@@ -18089,6 +18110,10 @@ impl Game<'_> {
+     /// winit's `about_to_wait`: what happens between frames (stop requests, the closing
+     /// save, world entry, the control socket, pads), then the next frame.
+     pub(super) fn idle(&mut self, event_loop: &dyn EventLoopCtl) {
++        #[cfg(target_os = "ios")]
++        if let Err(error) = self.ios_input() {
++            self.error = Some(error);
++        }
+         // A splitscreen player's game has nothing to save: P1's shuts the process down.
+         if horizon_threads::stop_requests() > 0
+             && !self.options.split_guest
+@@ -20387,6 +20412,10 @@ impl Loading {
+             || self.ui_at.is_none_or(|at| at.elapsed() >= TITLE_FRAME_WAIT)
+     }
+     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
++        #[cfg(target_os = "ios")]
++        {
++            horizon_ios_platform::background(false);
++        }
+         if self.window.is_some() {
+             return;
+         }
+@@ -20423,6 +20452,8 @@ impl Loading {
+             }
+         };
+         drop(window_step);
++        #[cfg(target_os = "ios")]
++        horizon_ios_platform::attach(&window, false);
+         horizon_client::telemetry::note_display(&window);
+         // The renderer takes seconds to build and winit's window sits white
+         // until the first frame presents, so paint the boot screen on it and
+@@ -20481,6 +20512,15 @@ impl Loading {
+         if self.window.as_ref().is_none_or(|w| w.id() != id) {
+             return;
+         }
++        #[cfg(target_os = "ios")]
++        if let WindowEvent::Touch(touch) = &event {
++            for event in ios_touch_events(touch) {
++                if let Err(error) = self.menu_event(event_loop, event) {
++                    self.error = Some(error);
++                }
++            }
++            return;
++        }
+         follow_keymap(&mut event);
+         if let Err(error) = self.menu_event(event_loop, event) {
+             self.error = Some(error);
+@@ -20673,6 +20713,20 @@ enum App {
+     Ready(Box<split::Split<'static>>),
+ }
+ impl ApplicationHandler for App {
++    #[cfg(target_os = "ios")]
++    fn suspended(&mut self, _: &ActiveEventLoop) {
++        if let App::Ready(split) = self {
++            split.host.ios_suspend();
++        }
++    }
++    #[cfg(target_os = "ios")]
++    fn memory_warning(&mut self, _: &ActiveEventLoop) {
++        if let App::Ready(split) = self {
++            split.host.settings.render_distance = 2;
++            split.host.settings.simulation_distance = 2;
++            split.host.apply_settings();
++        }
++    }
+     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+         match self {
+             App::Loading(loading) => loading.resumed(event_loop),
+@@ -20680,6 +20734,10 @@ impl ApplicationHandler for App {
+         }
+     }
+     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
++        #[cfg(target_os = "ios")]
++        if matches!(event, WindowEvent::RedrawRequested) && !horizon_ios_platform::active() {
++            return;
++        }
+         match self {
+             App::Loading(loading) => loading.window_event(event_loop, id, event),
+             App::Ready(game) => game.window_event(event_loop, id, event),
+@@ -20691,6 +20749,11 @@ impl ApplicationHandler for App {
+         }
+     }
+     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
++        #[cfg(target_os = "ios")]
++        if !horizon_ios_platform::active() {
++            event_loop.set_control_flow(ControlFlow::Wait);
++            return;
++        }
+         enum Step {
+             Waiting,
+             Ready(Box<split::Split<'static>>),
+@@ -20834,6 +20897,10 @@ pub fn run_with() -> Result<()> {
+     {
+         return Ok(());
+     }
++    #[cfg(target_os = "ios")]
++    {
++        options.resources = horizon_ios_platform::documents().join("resources");
++    }
+     let _ = horizon_client::health::HURT_SERVER.set(native_hooks::hurt_server);
+     let _ = horizon_client::block_contact::HOOK.set(native_hooks::block_contact);
+     let _ = horizon_client::health::KNOCKBACK.set(native_hooks::knockback);
+@@ -20871,6 +20938,11 @@ pub fn run_with() -> Result<()> {
+     }
+     let vanilla_root = options.resources.clone();
+     if let Some(error) = missing_resources(&vanilla_root) {
++        #[cfg(target_os = "ios")]
++        {
++            let _ = error;
++            return horizon_ios_platform::import_screen();
++        }
+         // The game build started by hand (the release's zip), not by the
+         // launcher: a window says where to get it. Scripts and servers get
+         // the error.
+diff --git a/crates/horizon-client/src/game/ios.rs b/crates/horizon-client/src/game/ios.rs
+new file mode 100644
+index 000000000..6e75ce326
+--- /dev/null
++++ b/crates/horizon-client/src/game/ios.rs
+@@ -0,0 +1,95 @@
++//! iOS uses the same mappings, interaction and text paths as desktop input.
++use super::*;
++
++pub(super) fn ios_touch_events(touch: &winit::event::Touch) -> Vec<WindowEvent> {
++    use winit::event::TouchPhase;
++    let mut events = vec![WindowEvent::CursorMoved {
++        device_id: touch.device_id,
++        position: touch.location,
++    }];
++    if touch.phase != TouchPhase::Moved {
++        events.push(WindowEvent::MouseInput {
++            device_id: touch.device_id,
++            state: if touch.phase == TouchPhase::Started {
++                ElementState::Pressed
++            } else {
++                ElementState::Released
++            },
++            button: MouseButton::Left,
++        });
++    }
++    events
++}
++impl Game<'_> {
++    pub(super) fn ios_suspend(&mut self) {
++        horizon_ios_platform::background(true);
++        self.keys.clear();
++        self.physical_keys.clear();
++        self.left = false;
++        self.right = false;
++        self.capture(false);
++        if self.screen == Screen::Playing {
++            self.screen = Screen::Paused;
++        }
++        if let Some(server) = &self.integrated {
++            // Save on the authoritative server thread, including region-writer completion.
++            let saved = server.call(|game| game.save_game().map_err(|e| e.to_string()));
++            if !matches!(saved, Some(Ok(()))) {
++                log::error!("iOS background save failed: {saved:?}");
++            }
++            server.set_paused(true);
++        }
++        horizon_client::logging::flush();
++        horizon_ios_platform::background(false);
++    }
++    fn ios_input(&mut self) -> Result<()> {
++        let playing = self.screen == Screen::Playing && self.title.is_none() && !self.dialog_open();
++        if let Some(window) = &self.window {
++            horizon_ios_platform::attach(window, false);
++        }
++        horizon_ios_platform::playing(playing);
++        while let Some(input) = horizon_ios_platform::poll() {
++            match input.kind {
++                1 => {
++                    let key = match input.code {
++                        0 => KeyCode::KeyA,
++                        1 => KeyCode::KeyD,
++                        2 => KeyCode::KeyW,
++                        3 => KeyCode::KeyS,
++                        4 => KeyCode::Space,
++                        5 => KeyCode::ShiftLeft,
++                        6 => KeyCode::ControlLeft,
++                        7 => KeyCode::KeyE,
++                        8 => KeyCode::Escape,
++                        9 => KeyCode::KeyT,
++                        10 => KeyCode::KeyQ,
++                        13 => KeyCode::Backspace,
++                        14 => KeyCode::Enter,
++                        _ => continue,
++                    };
++                    // Canonical actions avoid user keyboard remaps changing touch controls.
++                    self.mapped_key(key, input.x != 0.0, false)?;
++                }
++                2 if playing => match input.code {
++                    20 => self.play_mouse(MouseButton::Left, input.x != 0.0)?,
++                    21 => self.play_mouse(MouseButton::Right, input.x != 0.0)?,
++                    22 if input.x != 0.0 => self.selected = (self.selected + 8) % 9,
++                    23 if input.x != 0.0 => self.selected = (self.selected + 1) % 9,
++                    _ => {}
++                },
++                3 if playing => self.mouse.on_move(0.0, 0.0, input.x, input.y, true, true),
++                5 => {
++                    self.keys.clear();
++                    self.left = false;
++                    self.right = false;
++                }
++                _ => {}
++            }
++        }
++        let text = horizon_ios_platform::text();
++        if !text.is_empty() {
++            self.ime_commit(&text);
++        }
++        Ok(())
++    }
++}
+diff --git a/crates/horizon-hdr/Cargo.toml b/crates/horizon-hdr/Cargo.toml
+index 297c758b1..17280c646 100644
+--- a/crates/horizon-hdr/Cargo.toml
++++ b/crates/horizon-hdr/Cargo.toml
+@@ -9,7 +9,7 @@ description = "HDR metadata for the swapchain: the Vulkan calls the crates that
+ [dependencies]
+ wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
+ 
+-[target.'cfg(not(target_os = "macos"))'.dependencies]
++[target.'cfg(not(any(target_os = "macos", target_os = "ios")))'.dependencies]
+ # The version wgpu-hal already uses.
+ ash = { version = "0.38", default-features = false }
+ 
+diff --git a/crates/horizon-hdr/src/lib.rs b/crates/horizon-hdr/src/lib.rs
+index 4f7d73769..2f571129e 100644
+--- a/crates/horizon-hdr/src/lib.rs
++++ b/crates/horizon-hdr/src/lib.rs
+@@ -9,7 +9,7 @@ pub mod wayland;
+ /// Opens a Vulkan device with `VK_EXT_hdr_metadata` too, when the GPU offers
+ /// it, so [`set_metadata`] can tell the compositor the real peak brightness.
+ /// `None` leaves opening to wgpu.
+-#[cfg(not(target_os = "macos"))]
++#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+ pub fn open_vulkan_device(
+     adapter: &wgpu::Adapter,
+     desc: &wgpu::DeviceDescriptor<'_>,
+@@ -57,7 +57,7 @@ pub fn set_metadata(
+     peak: f32,
+     black: f32,
+ ) {
+-    #[cfg(not(target_os = "macos"))]
++    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+     {
+         use wgpu::hal::api::Vulkan;
+         // Safety: read-only access to handles wgpu keeps alive while these guards live.
+@@ -94,6 +94,6 @@ pub fn set_metadata(
+         // Safety: a live swapchain of this device, one metadata entry for it.
+         unsafe { loader.set_hdr_metadata(&[swapchain], &[metadata]) };
+     }
+-    #[cfg(target_os = "macos")]
++    #[cfg(any(target_os = "macos", target_os = "ios"))]
+     let _ = (device, surface, paper_white, peak, black);
+ }
