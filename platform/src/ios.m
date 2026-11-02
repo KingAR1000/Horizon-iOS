@@ -7,7 +7,7 @@ typedef struct { int kind, code; double x, y; } HZInput;
 static HZInput events[512];
 static unsigned head, tail;
 static NSString *returned;
-static UIBackgroundTaskIdentifier backgroundTask = UIBackgroundTaskInvalid;
+static UIBackgroundTaskIdentifier backgroundTask;
 static void emit(int kind, int code, double x, double y) {
     unsigned next = (head + 1) % 512;
     if (next == tail) { tail = head = 0; events[head++] = (HZInput){5,0,0,0}; }
@@ -24,6 +24,8 @@ const char *hz_documents(void) {
 const char *hz_clipboard_get(void) { returned = UIPasteboard.generalPasteboard.string ?: @""; return returned.UTF8String; }
 void hz_clipboard_set(const char *text) { UIPasteboard.generalPasteboard.string = [NSString stringWithUTF8String:text]; }
 void hz_background(bool begin) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ backgroundTask = UIBackgroundTaskInvalid; });
     if (begin && backgroundTask == UIBackgroundTaskInvalid) {
         backgroundTask = [UIApplication.sharedApplication beginBackgroundTaskWithExpirationHandler:^{
             if (backgroundTask != UIBackgroundTaskInvalid) {
