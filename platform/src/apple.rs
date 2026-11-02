@@ -18,7 +18,6 @@ unsafe extern "C" {
     fn hz_poll(input: *mut Input) -> bool;
     fn hz_clipboard_get() -> *const c_char;
     fn hz_clipboard_set(text: *const c_char);
-    fn hz_text() -> *const c_char;
     fn hz_background(begin: bool);
 }
 fn string(ptr: *const c_char) -> String {
@@ -74,9 +73,6 @@ pub fn playing(value: bool) {
 pub fn poll() -> Option<Input> {
     let mut event = Input::default();
     unsafe { hz_poll(&mut event) }.then_some(event)
-}
-pub fn text() -> String {
-    string(unsafe { hz_text() })
 }
 pub fn clipboard_get() -> String {
     string(unsafe { hz_clipboard_get() })

@@ -10,7 +10,6 @@ fn main() {
             "UIKit",
             "Foundation",
             "UniformTypeIdentifiers",
-            "GameController",
             "AVFoundation",
         ] {
             println!("cargo:rustc-link-lib=framework={framework}");

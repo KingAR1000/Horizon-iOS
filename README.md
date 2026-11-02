@@ -8,7 +8,7 @@ Run **Actions → Build unsigned iOS IPA → Run workflow**, then download the `
 
 Prepare resources from your own Minecraft installation using the pinned engine's [build instructions](engine/README.md#build-from-source) on a desktop. Copy the resulting folder containing `horizon-resources.json` to Files on the phone. On first launch select **Import resources**, choose that folder, then close and reopen Horizon. Game files, saves, settings and logs live in Horizon's Documents folder, accessible through Files/Finder. Proprietary game resources are never distributed here.
 
-Move with the left touch pad, drag the right half to look, and use the labeled action buttons. Tap menus directly; **Keyboard** opens text input. The arrow buttons cycle hotbar slots. Graphics settings are adjustable in game; start with the conservative defaults on older phones.
+Move with the left touch pad, drag the right half to look, and use the labeled action buttons. Tap menus directly; **Keyboard** opens text input. The arrow buttons cycle hotbar slots. In menus, **Use** right-clicks the last touched position (for splitting inventory stacks). Graphics settings are adjustable in game; start with the conservative defaults on older phones.
 
 ## Build
 

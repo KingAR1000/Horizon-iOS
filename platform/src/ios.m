@@ -1,13 +1,11 @@
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <AVFoundation/AVFoundation.h>
-#import <GameController/GameController.h>
 
 // UIKit and Rust consume this queue on the same main thread.
 typedef struct { int kind, code; double x, y; } HZInput;
 static HZInput events[512];
 static unsigned head, tail;
-static NSMutableString *typed;
 static NSString *returned;
 static UIBackgroundTaskIdentifier backgroundTask = UIBackgroundTaskInvalid;
 static void emit(int kind, int code, double x, double y) {
@@ -25,7 +23,6 @@ const char *hz_documents(void) {
 }
 const char *hz_clipboard_get(void) { returned = UIPasteboard.generalPasteboard.string ?: @""; return returned.UTF8String; }
 void hz_clipboard_set(const char *text) { UIPasteboard.generalPasteboard.string = [NSString stringWithUTF8String:text]; }
-const char *hz_text(void) { returned = [typed copy] ?: @""; typed = [NSMutableString new]; return returned.UTF8String; }
 void hz_background(bool begin) {
     if (begin && backgroundTask == UIBackgroundTaskInvalid) {
         backgroundTask = [UIApplication.sharedApplication beginBackgroundTaskWithExpirationHandler:^{
@@ -55,14 +52,10 @@ static HZOverlay *overlay;
 - (UIKeyboardType)keyboardType { return UIKeyboardTypeASCIICapable; }
 - (UITextAutocorrectionType)autocorrectionType { return UITextAutocorrectionTypeNo; }
 - (void)insertText:(NSString *)text {
-    if (!typed) typed = [NSMutableString new];
-    for (NSUInteger i=0; i<text.length; ++i) {
-        unichar c = [text characterAtIndex:i];
-        if (c == '\n') { emit(1,14,1,0); emit(1,14,0,0); [self resignFirstResponder]; }
-        else [typed appendFormat:@"%C",c];
-    }
+    [(id<UIKeyInput>)self.superview insertText:text];
+    if ([text containsString:@"\n"]) [self resignFirstResponder];
 }
-- (void)deleteBackward { emit(1,13,1,0); emit(1,13,0,0); }
+- (void)deleteBackward { [(id<UIKeyInput>)self.superview deleteBackward]; }
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:p withEvent:event];
     return hit == self ? nil : hit;
@@ -122,7 +115,7 @@ static HZOverlay *overlay;
     self.look.frame=CGRectMake(CGRectGetMidX(r),top,r.size.width/2,r.size.height-80);
     self.stick.frame=CGRectMake(left,bottom-145,120,120);
     for (UIButton *b in self.buttons) {
-        b.hidden = self.importing ? b.tag != 101 : (!self.playing && b.tag != 8 && b.tag != 100);
+        b.hidden = self.importing ? b.tag != 101 : (!self.playing && b.tag != 8 && b.tag != 100 && b.tag != 21);
         switch (b.tag) {
             case 4:b.frame=CGRectMake(right-70,bottom-70,70,60);break;
             case 5:b.frame=CGRectMake(right-150,bottom-70,70,60);break;
